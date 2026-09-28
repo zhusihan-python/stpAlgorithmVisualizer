@@ -138,3 +138,38 @@ def default_host_switch(name: str, topology: stp.Topology, seed: int) -> str:
     import random
     rng = random.Random(seed + 1000)
     return rng.choice([s.id for s in topology.switches])
+
+
+# Second-instance root overrides: give a different switch a lower priority so
+# the second PVST VLAN / MST instance elects a different root and builds a
+# different tree (the load-balancing story).
+SECOND_ROOT_OVERRIDES = {
+    "triangle": {"S1": 4096},
+    "square-diagonal": {"S4": 4096},
+    "classic-6": {"S1": 4096},
+}
+
+
+def _second_root_overrides(name, topology, seed):
+    if name in SECOND_ROOT_OVERRIDES:
+        return dict(SECOND_ROOT_OVERRIDES[name])
+    import random
+    base_root = stp.simulate(topology).root_id
+    rng = random.Random(seed + 2000)
+    candidates = [s.id for s in topology.switches if s.id != base_root]
+    return {rng.choice(candidates): 4096}
+
+
+def build_instances(protocol, name, topology, seed):
+    """Instance definitions for pvst/mstp modes."""
+    from mstp import Instance
+    overrides = _second_root_overrides(name, topology, seed)
+    if protocol == "pvst":
+        return [
+            Instance("VLAN 10", ["10"], {}),
+            Instance("VLAN 20", ["20"], overrides),
+        ]
+    return [
+        Instance("MST1", ["10", "20"], {}),
+        Instance("MST2", ["30", "40"], overrides),
+    ]
