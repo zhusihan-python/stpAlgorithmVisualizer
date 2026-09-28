@@ -73,6 +73,33 @@
   #events { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px;
             max-height: 150px; overflow-y: auto; }
   #events li { margin: 2px 0; }
+  .controls button.concept { border-color: #6366f1; color: #c7d2fe; }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(2, 6, 23, .72);
+    display: none; z-index: 50; align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    width: min(92vw, 720px); max-height: 84vh; overflow-y: auto;
+    padding: 18px 26px 22px;
+  }
+  .modal h2 { margin: 0 0 6px; font-size: 17px; }
+  .modal h3 { margin: 14px 0 6px; font-size: 13px; color: #818cf8; }
+  .modal p { font-size: 13.5px; line-height: 1.75; margin: 4px 0; }
+  .modal ul { padding-left: 20px; margin: 4px 0; }
+  .modal li { font-size: 13.5px; line-height: 1.7; margin: 3px 0; }
+  .modal dt { font-weight: 600; font-size: 13.5px; margin-top: 7px; }
+  .modal dd { margin: 1px 0 0 18px; color: var(--muted); font-size: 13px;
+              line-height: 1.6; }
+  .modal .close {
+    float: right; background: none; border: none; color: var(--muted);
+    font-size: 19px; cursor: pointer; padding: 0 4px;
+  }
+  .modal .scenario {
+    color: #c7d2fe; font-size: 13px; line-height: 1.6;
+    border-left: 3px solid #6366f1; padding-left: 10px; margin: 6px 0 2px;
+  }
 </style>
 </head>
 <body>
@@ -92,6 +119,7 @@
       <option value="1" selected>1×</option>
       <option value="2">2×</option>
     </select>
+    <button id="btn-concept" class="concept" title="核心算法思路讲解">📖 原理</button>
     <span id="counter"></span>
   </div>
 </header>
@@ -114,6 +142,13 @@
   <div class="card"><h3>当前步骤</h3><div id="desc"></div></div>
   <div class="card"><h3>本轮 BPDU / 结果</h3><ol id="events"></ol></div>
 </footer>
+
+<div id="concept-modal" class="modal-backdrop">
+  <div class="modal">
+    <button class="close" id="concept-close" title="关闭 (Esc)">✕</button>
+    <div id="concept-body"></div>
+  </div>
+</div>
 
 <script>
 const DATA = __DATA__;
@@ -237,7 +272,8 @@ function renderPanels() {
   }
   const st = steps[cur];
   $('counter').textContent = '第 ' + (cur + 1) + ' / ' + steps.length + ' 步';
-  $('desc').textContent = st.description;
+  $('desc').textContent = st.description +
+    (cur === 0 && DATA.concept ? '（💡 可先点右上角「📖 原理」了解核心思路。）' : '');
   const list = $('events');
   list.innerHTML = '';
   if (st.kind === 'round' || st.kind === 'handshake') {
@@ -574,8 +610,35 @@ function switchInstance(i) {
   updateTabs();
 }
 
+function buildConceptModal() {
+  const modal = $('concept-modal');
+  if (!DATA.concept) { $('btn-concept').style.display = 'none'; return; }
+  const c = DATA.concept;
+  let html = '<h2>' + c.title + '</h2>';
+  if (c.scenario) html += '<p class="scenario">' + c.scenario + '</p>';
+  html += '<h3>要解决的问题</h3><p>' + c.problem + '</p>';
+  html += '<h3>核心思路</h3><p>' + c.idea + '</p>';
+  if (c.rules) {
+    html += '<h3>关键规则</h3><ul>' +
+            c.rules.map(r => '<li>' + r + '</li>').join('') + '</ul>';
+  }
+  if (c.glossary) {
+    html += '<h3>术语速查</h3><dl>' +
+            c.glossary.map(g => '<dt>' + g[0] + '</dt><dd>' + g[1] + '</dd>')
+                      .join('') + '</dl>';
+  }
+  $('concept-body').innerHTML = html;
+  $('btn-concept').onclick = () => modal.classList.add('open');
+  modal.onclick = e => { if (e.target === modal) modal.classList.remove('open'); };
+  $('concept-close').onclick = () => modal.classList.remove('open');
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') modal.classList.remove('open');
+  });
+}
+
 $('title').textContent = DATA.title;
 $('subtitle').textContent = DATA.subtitle;
+buildConceptModal();
 buildTabs();
 setStep(0);
 requestAnimationFrame(draw);

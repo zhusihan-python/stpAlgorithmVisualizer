@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
+import concepts
 import mstp
 import rstp
 import stp
@@ -42,6 +43,7 @@ def serialize_topology(topology: stp.Topology, hosts=()) -> dict:
 def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
                    seed: int = 42):
     """Run the simulation and return (embedded document, summary lines)."""
+    concept = concepts.for_protocol(protocol, name)
     if protocol in ("pvst", "mstp"):
         instances = topologies.build_instances(protocol, name, topology, seed)
         result = mstp.simulate_multi(topology, instances, protocol)
@@ -57,6 +59,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
                 f"{vlan_count} 个 VLAN"
             ),
             "topology": serialize_topology(topology),
+            "concept": concept,
             "instances": result.instances,
         }
         return document, result
@@ -74,6 +77,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
                 f"{len(topology.links)} 条链路 · {len(result.steps)} 步{failure}"
             ),
             "topology": serialize_topology(topology, result.hosts),
+            "concept": concept,
             "steps": result.steps,
         }
         return document, result
@@ -87,6 +91,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
             f"{len(topology.links)} 条链路 · 收敛于 {len(result.steps)} 步"
         ),
         "topology": serialize_topology(topology),
+        "concept": concept,
         "steps": result.steps,
     }
     return document, result
