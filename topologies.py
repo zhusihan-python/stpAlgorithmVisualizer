@@ -163,8 +163,8 @@ def _second_root_overrides(name, topology, seed):
     return {rng.choice(candidates): 4096}
 
 
-def from_file(path) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
-    """Load a custom topology from a JSON file.
+def from_dict(data) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
+    """Build a topology (plus optional positions) from a parsed payload.
 
     Schema::
 
@@ -179,7 +179,6 @@ def from_file(path) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
     Graph rules (connectivity, no duplicates, cost >= 1) are enforced by
     ``stp.validate``.
     """
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict) or "switches" not in data or "links" not in data:
         raise ValueError("topology file needs top-level 'switches' and 'links'")
 
@@ -208,6 +207,11 @@ def from_file(path) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
     topology = stp.Topology(switches=switches, links=links)
     stp.validate(topology)
     return topology, positions
+
+
+def from_file(path) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
+    """Load a custom topology from a JSON file (see ``from_dict``)."""
+    return from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def build_instances(protocol, name, topology, seed):

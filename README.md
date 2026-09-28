@@ -31,6 +31,28 @@ python3 generate.py -p rstp -t random -n 10    # RSTP + 随机拓扑
 python3 generate.py -t random -n 10 --json steps.json   # 同时导出原始步骤 JSON
 ```
 
+## 网页拓扑编辑器
+
+```bash
+python3 serve.py         # 打开 http://127.0.0.1:8765/editor.html
+```
+
+在编辑器里拖动交换机摆放、依次点击两台交换机连边、右侧面板调整
+优先级/链路成本（或导入导出拓扑 JSON），选协议后「生成动画」——浏览器
+把拓扑 POST 给本地服务，Python 端跑完模拟返回步骤数据，页面下方直接
+逐步播放（含 RSTP 全部相位与多实例标签/叠加视图）。模拟逻辑只在
+Python，前端零重复实现。
+
+自定义拓扑文件同样可以直接走 CLI（编辑器「导入/导出 JSON」就是此格式）：
+
+```bash
+python3 generate.py -f my-topo.json -p rstp -o my.html
+```
+
+文件结构：`{"switches": [{"id","priority?","mac?","x?","y?"}], "links":
+[{"a","b","cost?"}]}`，其中 `x`/`y` 是 0–1 归一化画布坐标，省略则用
+环形布局。
+
 ## RSTP 模式演示什么
 
 `-p rstp` 在同一套步骤流水线上追加经典 STP 没有的内容：
@@ -79,12 +101,13 @@ python3 generate.py -t random -n 10 --json steps.json   # 同时导出原始步�
 | 文件 | 职责 |
 |---|---|
 | `stp.py` | 经典 STP 模拟核心（纯逻辑，无 I/O）：轮次化 BPDU 交换、根桥选举、端口角色 |
-| `rstp.py` | RSTP 扩展：P/A 级联、边缘端口、故障切换（复用 `stp.simulate`） |
+| `rstp.py` | RSTP 扩展：P/A 级联、边缘端口、断链/加链/上线/根迁移全故事线（复用 `stp.simulate`） |
 | `mstp.py` | PVST+/MSTP 多实例模拟：按实例覆盖优先级后逐实例复用 `stp.simulate` |
-| `topologies.py` | 内置教学样例、随机拓扑生成器、多实例定义 |
-| `generate.py` | CLI：`-p stp\|rstp\|pvst\|mstp`，组装数据嵌入 `template.html` |
-| `template.html` | 播放器模板（原生 JS + canvas，零依赖；多实例时渲染标签页） |
-| `test_*.py` | 单元测试：根选举、最短路一致性、生成树无环、级联顺序、备用提升、多实例树差异、确定性等 |
+| `topologies.py` | 内置教学样例、随机拓扑生成器、多实例定义、自定义拓扑加载（`from_dict`/`from_file`） |
+| `generate.py` | CLI：`-p stp\|rstp\|pvst\|mstp`、`-t 样例\|-f 拓扑文件`，组装数据并把 `player.js` 内联进单文件页面 |
+| `template.html` | 单文件播放器外壳（构建时注入数据与播放器代码） |
+| `player.js` / `editor.html` / `editor.js` / `serve.py` | 网页播放器本体与拓扑编辑器（本地服务 + `/generate` 端点） |
+| `test_*.py` | 单元测试：协议不变量、相位正确性、端点集成、打包一致性等 |
 
 ## 模拟模型（教学简化）
 
