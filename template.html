@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STP 逐步动画</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8;
+    --accent: #3b82f6; --green: #22c55e; --red: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+  }
+  header {
+    width: 100%; max-width: 1000px; padding: 14px 18px 10px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .controls { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .controls button, .controls select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 14px; cursor: pointer;
+  }
+  .controls button:hover:not(:disabled) { border-color: var(--accent); }
+  .controls button:disabled { opacity: .35; cursor: default; }
+  .controls button.play { background: var(--accent); border-color: var(--accent); min-width: 56px; }
+  #counter { color: var(--muted); font-size: 13px; min-width: 96px; text-align: right; }
+  main { width: 100%; max-width: 1000px; padding: 0 18px; }
+  #stage {
+    width: 100%; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; display: block;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 16px; padding: 10px 4px;
+    color: var(--muted); font-size: 12.5px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 18px; height: 0; border-top: 3px solid #475569; display: inline-block; }
+  .swatch.tree { border-color: var(--green); border-top-width: 4px; }
+  .swatch.blocked { border-color: var(--red); border-top-style: dashed; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; display: inline-block; }
+  .dot.root { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,.35); }
+  footer {
+    width: 100%; max-width: 1000px; padding: 6px 18px 24px;
+    display: grid; grid-template-columns: 3fr 2fr; gap: 14px;
+  }
+  @media (max-width: 760px) { footer { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; font-size: 14px; line-height: 1.65;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  #events { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px;
+            max-height: 150px; overflow-y: auto; }
+  #events li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">STP 逐步动画</h1>
+    <div class="sub" id="subtitle"></div>
+  </div>
+  <div class="controls">
+    <button id="btn-first" title="回到第一步 (Home)">⏮</button>
+    <button id="btn-prev" title="上一步 (←)">◀</button>
+    <button id="btn-play" class="play" title="播放/暂停 (空格)">▶</button>
+    <button id="btn-next" title="下一步 (→)">▶|</button>
+    <button id="btn-last" title="最后一步 (End)">⏭</button>
+    <select id="speed" title="播放速度">
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+    </select>
+    <span id="counter"></span>
+  </div>
+</header>
+<main>
+  <canvas id="stage"></canvas>
+  <div class="legend">
+    <span><i class="swatch tree"></i>生成树链路（转发）</span>
+    <span><i class="swatch blocked"></i>被阻塞的链路</span>
+    <span><i class="swatch"></i>普通链路（收敛前）</span>
+    <span><i class="dot"></i>BPDU（根/成本）</span>
+    <span><i class="dot root"></i>根桥</span>
+  </div>
+</main>
+<footer>
+  <div class="card"><h3>当前步骤</h3><div id="desc"></div></div>
+  <div class="card"><h3>本轮 BPDU / 结果</h3><ol id="events"></ol></div>
+</footer>
+
+<script>
+const DATA = __DATA__;
+const topo = DATA.topology;
+const steps = DATA.steps;
+const N = topo.switches.length;
+
+const W = 960, H = 640, R = Math.min(W, H) / 2 - 115;
+const CX = W / 2, CY = H / 2 + 6;
+const NODE_R = 26;
+const PACKET_MS = 1300, HOLD_MS = 900;
+
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+(function setupCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.aspectRatio = W + ' / ' + H;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+})();
+
+const pos = {};
+topo.switches.forEach((s, i) => {
+  const a = -Math.PI / 2 + 2 * Math.PI * i / N;
+  pos[s.id] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+});
+const swById = {};
+topo.switches.forEach(s => { swById[s.id] = s; });
+
+let cur = 0, playing = false, speed = 1, enterTime = performance.now();
+let packets = [];
+
+const $ = id => document.getElementById(id);
+
+function setStep(i, keepPlaying) {
+  if (!keepPlaying) { playing = false; }
+  cur = Math.max(0, Math.min(steps.length - 1, i));
+  enterTime = performance.now();
+  const st = steps[cur];
+  packets = st.kind === 'round'
+    ? st.events.map(e => ({ from: pos[e.from], to: pos[e.to], label: e.root + '/' + e.cost }))
+    : [];
+  renderPanels();
+  updateButtons();
+}
+
+function portLine(sid, st) {
+  if (st.kind !== 'final') {
+    const info = st.switches[sid];
+    return '根:' + info.root + ' 成本:' + info.cost +
+           (info.root_port ? ' →' + info.root_port : '');
+  }
+  const p = st.roles.ports[sid];
+  if (sid === st.roles.root) return '根桥 · 全端口指定';
+  let line = '根端口→' + p.root_port;
+  if (p.blocked.length) line += '；阻塞→' + p.blocked.join(',');
+  return line;
+}
+
+function renderPanels() {
+  const st = steps[cur];
+  $('counter').textContent = '第 ' + (cur + 1) + ' / ' + steps.length + ' 步';
+  $('desc').textContent = st.description;
+  const list = $('events');
+  list.innerHTML = '';
+  if (st.kind === 'round') {
+    st.events.forEach(e => {
+      const li = document.createElement('li');
+      li.textContent = e.from + ' → ' + e.to + '：根=' + e.root + '，成本=' + e.cost;
+      list.appendChild(li);
+    });
+  } else if (st.kind === 'final') {
+    Object.entries(st.roles.blocked_ends).forEach(([linkId, blockedSw]) => {
+      const li = document.createElement('li');
+      li.textContent = linkId.replace('-', '–') + '：' + blockedSw + ' 侧端口阻塞（备用端口）';
+      li.style.color = '#fca5a5';
+      list.appendChild(li);
+    });
+    if (!Object.keys(st.roles.blocked_ends).length) {
+      const li = document.createElement('li');
+      li.textContent = '无冗余链路，没有端口被阻塞';
+      list.appendChild(li);
+    }
+  } else {
+    const li = document.createElement('li');
+    li.textContent = '尚未开始 BPDU 交换';
+    list.appendChild(li);
+  }
+}
+
+function updateButtons() {
+  $('btn-first').disabled = $('btn-prev').disabled = cur === 0;
+  $('btn-next').disabled = $('btn-last').disabled = cur === steps.length - 1;
+  $('btn-play').textContent = playing ? '⏸' : '▶';
+}
+
+function lerp(p1, p2, t) {
+  return { x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t };
+}
+
+function drawArrow(at, toward, color) {
+  const angle = Math.atan2(toward.y - at.y, toward.x - at.x);
+  ctx.save();
+  ctx.translate(at.x, at.y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(8, 0); ctx.lineTo(-6, 6); ctx.lineTo(-6, -6); ctx.closePath();
+  ctx.fillStyle = color; ctx.fill();
+  ctx.restore();
+}
+
+function drawX(at, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(at.x - 7, at.y - 7); ctx.lineTo(at.x + 7, at.y + 7);
+  ctx.moveTo(at.x + 7, at.y - 7); ctx.lineTo(at.x - 7, at.y + 7);
+  ctx.stroke();
+}
+
+function draw(now) {
+  ctx.clearRect(0, 0, W, H);
+  const st = steps[cur];
+  const isFinal = st.kind === 'final';
+
+  for (const l of topo.links) {
+    const p1 = pos[l.a], p2 = pos[l.b];
+    let color = '#475569', width = 2, dash = [];
+    if (isFinal && st.roles.links[l.id] === 'tree') { color = '#22c55e'; width = 4; }
+    if (isFinal && st.roles.links[l.id] === 'blocked') { color = '#ef4444'; width = 2.5; dash = [9, 7]; }
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    ctx.setLineDash([]);
+    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 - 7 };
+    const costText = '成本 ' + l.cost;
+    ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    const costW = ctx.measureText(costText).width;
+    ctx.fillStyle = 'rgba(30,41,59,.92)';  // backdrop so the label reads over the line
+    ctx.fillRect(mid.x - costW / 2 - 3, mid.y - 11, costW + 6, 15);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(costText, mid.x, mid.y);
+    if (isFinal && st.roles.links[l.id] === 'blocked') {
+      const blockedSw = st.roles.blocked_ends[l.id];
+      const other = pos[blockedSw === l.a ? l.b : l.a];
+      drawX(lerp(pos[blockedSw], other, 0.3), '#ef4444');
+    }
+  }
+
+  if (st.kind === 'round') {
+    for (const sid in st.switches) {
+      const rp = st.switches[sid].root_port;
+      if (rp) drawArrow(lerp(pos[sid], pos[rp], 0.58), pos[rp], '#22c55e');
+    }
+  }
+
+  for (const s of topo.switches) {
+    const p = pos[s.id];
+    const info = st.switches[s.id];
+    const isRoot = isFinal && st.roles.root === s.id;
+    ctx.beginPath(); ctx.arc(p.x, p.y, NODE_R, 0, 2 * Math.PI);
+    ctx.fillStyle = isRoot ? '#f59e0b' : '#3b82f6'; ctx.fill();
+    if (!isFinal && info.root === s.id) {
+      ctx.lineWidth = 4; ctx.strokeStyle = '#facc15'; ctx.stroke();
+    }
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(s.id, p.x, p.y + 5);
+    if (isRoot) { ctx.fillStyle = '#fde68a'; ctx.font = 'bold 16px sans-serif';
+                  ctx.fillText('★', p.x, p.y - 34); }
+    ctx.fillStyle = '#94a3b8'; ctx.font = '11px sans-serif';
+    ctx.fillText(s.bridge_id, p.x, p.y + NODE_R + 16);
+    ctx.fillStyle = isFinal ? '#86efac' : '#cbd5e1'; ctx.font = '11.5px sans-serif';
+    ctx.fillText(portLine(s.id, st), p.x, p.y + NODE_R + 32);
+  }
+
+  if (st.kind === 'round') {
+    const t = Math.min(1, (now - enterTime) / (PACKET_MS / speed));
+    ctx.font = '10px sans-serif';
+    for (const pk of packets) {
+      const q = lerp(pk.from, pk.to, t);
+      ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, 2 * Math.PI);
+      ctx.fillStyle = '#f59e0b'; ctx.fill();
+      ctx.strokeStyle = '#78350f'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#fbbf24'; ctx.textAlign = 'center';
+      ctx.fillText(pk.label, q.x, q.y - 11);
+    }
+    if (playing && t >= 1 && now > enterTime + (PACKET_MS + HOLD_MS) / speed) advance();
+  } else if (playing && now > enterTime + 500 / speed) {
+    advance();
+  }
+  requestAnimationFrame(draw);
+}
+
+function advance() {
+  if (cur < steps.length - 1) setStep(cur + 1, true);
+  else { playing = false; updateButtons(); }
+}
+
+$('btn-first').onclick = () => setStep(0);
+$('btn-prev').onclick = () => setStep(cur - 1);
+$('btn-next').onclick = () => setStep(cur + 1);
+$('btn-last').onclick = () => setStep(steps.length - 1);
+$('btn-play').onclick = () => {
+  if (!playing && cur === steps.length - 1) setStep(0);  // replay from the start
+  playing = !playing; enterTime = performance.now(); updateButtons();
+};
+$('speed').onchange = e => { speed = parseFloat(e.target.value); };
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') { setStep(cur - 1); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { setStep(cur + 1); e.preventDefault(); }
+  else if (e.key === ' ') { $('btn-play').click(); e.preventDefault(); }
+  else if (e.key === 'Home') { setStep(0); e.preventDefault(); }
+  else if (e.key === 'End') { setStep(steps.length - 1); e.preventDefault(); }
+});
+
+$('title').textContent = DATA.title;
+$('subtitle').textContent = DATA.subtitle;
+setStep(0);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
