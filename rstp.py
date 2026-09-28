@@ -407,7 +407,12 @@ def _better_link_phase(topology: stp.Topology, sim: stp.SimulationResult,
 # Switch-join scenarios
 
 def _join_switch(topology: stp.Topology, priority: int) -> stp.Switch:
-    num = max(int(s.id[1:]) for s in topology.switches) + 1
+    """Next free switch: continue the S<n> sequence if the topology uses it,
+    otherwise start at S1 (custom topologies may use arbitrary names)."""
+    import re
+    nums = [int(m.group(1)) for s in topology.switches
+            if (m := re.fullmatch(r"S(\d+)", s.id))]
+    num = (max(nums) + 1) if nums else 1
     mac = "00:00:00:00:{:02x}:{:02x}".format(num // 256, num % 256)
     return stp.Switch(id=f"S{num}", priority=priority, mac=mac)
 

@@ -48,9 +48,19 @@ def serialize_topology(topology: stp.Topology, hosts=(), appear=None) -> dict:
 
 
 def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
-                   seed: int = 42):
-    """Run the simulation and return (embedded document, summary lines)."""
+                   seed: int = 42, positions=None):
+    """Run the simulation and return (embedded document, summary lines).
+
+    ``positions`` maps switch id -> (x, y) normalized to 0..1; when given
+    the player uses them instead of the circular layout."""
     concept = concepts.for_protocol(protocol, name)
+
+    def add_positions(document):
+        if positions:
+            document["positions"] = {
+                sid: {"x": round(x, 4), "y": round(y, 4)}
+                for sid, (x, y) in positions.items()}
+        return document
     if protocol in ("pvst", "mstp"):
         instances = topologies.build_instances(protocol, name, topology, seed)
         result = mstp.simulate_multi(topology, instances, protocol)
@@ -69,7 +79,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
             "concept": concept,
             "instances": result.instances,
         }
-        return document, result
+        return add_positions(document), result
 
     if protocol == "rstp":
         hosts = [rstp.Host("PC1", topologies.default_host_switch(name, topology, seed))]
@@ -93,7 +103,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
             "concept": concept,
             "steps": result.steps,
         }
-        return document, result
+        return add_positions(document), result
 
     result = stp.simulate(topology)
     document = {
@@ -107,7 +117,7 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
         "concept": concept,
         "steps": result.steps,
     }
-    return document, result
+    return add_positions(document), result
 
 
 def render_html(document: dict, template: str) -> str:
@@ -138,6 +148,11 @@ def main(argv=None) -> None:
         help="protocol to animate (default: stp)",
     )
     parser.add_argument(
+        "-f", "--topology-file", metavar="FILE",
+        help="custom topology JSON instead of a built-in sample "
+             "(schema: see topologies.from_file)",
+    )
+    parser.add_argument(
         "-o", "--output", default=None,
         help="output HTML file (default: stp.html / rstp.html by protocol)",
     )
@@ -148,10 +163,17 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     output = args.output or (f"{args.protocol}.html")
 
-    topology = topologies.BUILDERS[args.topology](args)
+    positions = None
+    if args.topology_file:
+        topology, positions = topologies.from_file(args.topology_file)
+        topology_name = "custom"
+    else:
+        topology = topologies.BUILDERS[args.topology](args)
+        topology_name = args.topology
     stp.validate(topology)
-    document, result = build_document(args.topology, topology,
-                                      protocol=args.protocol, seed=args.seed)
+    document, result = build_document(
+        topology_name, topology, protocol=args.protocol, seed=args.seed,
+        positions=positions)
 
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     Path(output).write_text(render_html(document, template), encoding="utf-8")
