@@ -44,8 +44,12 @@
   .swatch { width: 18px; height: 0; border-top: 3px solid #475569; display: inline-block; }
   .swatch.tree { border-color: var(--green); border-top-width: 4px; }
   .swatch.blocked { border-color: var(--red); border-top-style: dashed; }
+  .swatch.down { border-color: #b91c1c; border-top-style: dotted; border-top-width: 4px; }
+  .swatch.edge { border-color: #64748b; border-top-style: dashed; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; display: inline-block; }
   .dot.root { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,.35); }
+  .dot.proposal { background: #fbbf24; }
+  .dot.agreement { background: #2dd4bf; }
   footer {
     width: 100%; max-width: 1000px; padding: 6px 18px 24px;
     display: grid; grid-template-columns: 3fr 2fr; gap: 14px;
@@ -85,9 +89,13 @@
   <canvas id="stage"></canvas>
   <div class="legend">
     <span><i class="swatch tree"></i>生成树链路（转发）</span>
-    <span><i class="swatch blocked"></i>被阻塞的链路</span>
+    <span><i class="swatch blocked"></i>被阻塞/备用的链路</span>
     <span><i class="swatch"></i>普通链路（收敛前）</span>
+    <span><i class="swatch down"></i>断开的链路</span>
+    <span><i class="swatch edge"></i>边缘端口（连主机）</span>
     <span><i class="dot"></i>BPDU（根/成本）</span>
+    <span><i class="dot proposal"></i>提案 Proposal</span>
+    <span><i class="dot agreement"></i>同意 Agreement</span>
     <span><i class="dot root"></i>根桥</span>
   </div>
 </main>
@@ -123,20 +131,39 @@ topo.switches.forEach((s, i) => {
 });
 const swById = {};
 topo.switches.forEach(s => { swById[s.id] = s; });
+const hosts = topo.hosts || [];
+const hpos = {};
+hosts.forEach(h => {
+  const s = pos[h.attached_to];
+  const dx = s.x - CX, dy = s.y - CY;
+  const len = Math.hypot(dx, dy) || 1;
+  hpos[h.id] = { x: s.x + dx / len * 95, y: s.y + dy / len * 95 };
+});
 
 let cur = 0, playing = false, speed = 1, enterTime = performance.now();
 let packets = [];
 
 const $ = id => document.getElementById(id);
 
+function packetInfo(e) {
+  if (e.kind === 'proposal') return { color: '#fbbf24', ring: '#92400e', label: '提案' };
+  if (e.kind === 'agreement') return { color: '#2dd4bf', ring: '#134e4a', label: '同意' };
+  return { color: '#f59e0b', ring: '#78350f', label: e.root + '/' + e.cost };
+}
+
 function setStep(i, keepPlaying) {
   if (!keepPlaying) { playing = false; }
   cur = Math.max(0, Math.min(steps.length - 1, i));
   enterTime = performance.now();
   const st = steps[cur];
-  packets = st.kind === 'round'
-    ? st.events.map(e => ({ from: pos[e.from], to: pos[e.to], label: e.root + '/' + e.cost }))
-    : [];
+  if (st.kind === 'round' || st.kind === 'handshake') {
+    packets = st.events.map(e => ({
+      from: pos[e.from], to: pos[e.to],
+      delay: e.delay || 0, ...packetInfo(e),
+    }));
+  } else {
+    packets = [];
+  }
   renderPanels();
   updateButtons();
 }
@@ -148,9 +175,10 @@ function portLine(sid, st) {
            (info.root_port ? ' →' + info.root_port : '');
   }
   const p = st.roles.ports[sid];
+  const blockedTerm = DATA.protocol === 'rstp' ? '备用' : '阻塞';
   if (sid === st.roles.root) return '根桥 · 全端口指定';
   let line = '根端口→' + p.root_port;
-  if (p.blocked.length) line += '；阻塞→' + p.blocked.join(',');
+  if (p.blocked.length) line += '；' + blockedTerm + '→' + p.blocked.join(',');
   return line;
 }
 
@@ -160,10 +188,18 @@ function renderPanels() {
   $('desc').textContent = st.description;
   const list = $('events');
   list.innerHTML = '';
-  if (st.kind === 'round') {
+  if (st.kind === 'round' || st.kind === 'handshake') {
     st.events.forEach(e => {
       const li = document.createElement('li');
-      li.textContent = e.from + ' → ' + e.to + '：根=' + e.root + '，成本=' + e.cost;
+      if (e.kind === 'proposal') {
+        li.textContent = e.from + ' → ' + e.to + '：提案 Proposal';
+        li.style.color = '#fcd34d';
+      } else if (e.kind === 'agreement') {
+        li.textContent = e.from + ' → ' + e.to + '：同意 Agreement';
+        li.style.color = '#5eead4';
+      } else {
+        li.textContent = e.from + ' → ' + e.to + '：根=' + e.root + '，成本=' + e.cost;
+      }
       list.appendChild(li);
     });
   } else if (st.kind === 'final') {
@@ -218,12 +254,18 @@ function draw(now) {
   ctx.clearRect(0, 0, W, H);
   const st = steps[cur];
   const isFinal = st.kind === 'final';
+  // RSTP steps carry an explicit per-step link-state map; classic STP only
+  // colours links at the final step via roles.
+  const stateMap = st.links || (isFinal && st.roles ? st.roles.links : null);
+  const blockedEnds = st.blocked_ends || (isFinal && st.roles ? st.roles.blocked_ends : null);
 
   for (const l of topo.links) {
     const p1 = pos[l.a], p2 = pos[l.b];
+    const role = stateMap ? stateMap[l.id] : null;
     let color = '#475569', width = 2, dash = [];
-    if (isFinal && st.roles.links[l.id] === 'tree') { color = '#22c55e'; width = 4; }
-    if (isFinal && st.roles.links[l.id] === 'blocked') { color = '#ef4444'; width = 2.5; dash = [9, 7]; }
+    if (role === 'tree' || role === 'forwarding') { color = '#22c55e'; width = 4; }
+    if (role === 'blocked' || role === 'alternate') { color = '#ef4444'; width = 2.5; dash = [9, 7]; }
+    if (role === 'down') { color = '#b91c1c'; width = 4; dash = [3, 6]; }
     ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
     ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
     ctx.setLineDash([]);
@@ -233,13 +275,31 @@ function draw(now) {
     const costW = ctx.measureText(costText).width;
     ctx.fillStyle = 'rgba(30,41,59,.92)';  // backdrop so the label reads over the line
     ctx.fillRect(mid.x - costW / 2 - 3, mid.y - 11, costW + 6, 15);
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = role === 'down' ? '#7f1d1d' : '#94a3b8';
     ctx.fillText(costText, mid.x, mid.y);
-    if (isFinal && st.roles.links[l.id] === 'blocked') {
-      const blockedSw = st.roles.blocked_ends[l.id];
+    if (role === 'down') {
+      drawX({ x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, '#ef4444');
+    } else if ((role === 'blocked' || role === 'alternate') && blockedEnds && blockedEnds[l.id]) {
+      const blockedSw = blockedEnds[l.id];
       const other = pos[blockedSw === l.a ? l.b : l.a];
       drawX(lerp(pos[blockedSw], other, 0.3), '#ef4444');
     }
+  }
+
+  // Edge links and host nodes (RSTP).
+  for (const h of hosts) {
+    const s = pos[h.attached_to], p = hpos[h.id];
+    ctx.strokeStyle = '#64748b'; ctx.lineWidth = 2; ctx.setLineDash([5, 5]);
+    ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('边缘', (s.x + p.x) / 2, (s.y + p.y) / 2 - 6);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(p.x - 24, p.y - 16, 48, 32, 6);
+    else ctx.rect(p.x - 24, p.y - 16, 48, 32);
+    ctx.fillStyle = '#475569'; ctx.fill();
+    ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(h.id, p.x, p.y + 4);
   }
 
   if (st.kind === 'round') {
@@ -268,18 +328,24 @@ function draw(now) {
     ctx.fillText(portLine(s.id, st), p.x, p.y + NODE_R + 32);
   }
 
-  if (st.kind === 'round') {
-    const t = Math.min(1, (now - enterTime) / (PACKET_MS / speed));
+  if (st.kind === 'round' || st.kind === 'handshake') {
+    let maxDelay = 0;
+    for (const pk of packets) maxDelay = Math.max(maxDelay, pk.delay);
     ctx.font = '10px sans-serif';
     for (const pk of packets) {
+      const t = Math.min(1, Math.max(0,
+        (now - enterTime) / (PACKET_MS / speed) - pk.delay));
+      if (t <= 0 && pk.delay > 0) continue;  // reply packet not sent yet
       const q = lerp(pk.from, pk.to, t);
       ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, 2 * Math.PI);
-      ctx.fillStyle = '#f59e0b'; ctx.fill();
-      ctx.strokeStyle = '#78350f'; ctx.lineWidth = 1.5; ctx.stroke();
-      ctx.fillStyle = '#fbbf24'; ctx.textAlign = 'center';
+      ctx.fillStyle = pk.color; ctx.fill();
+      ctx.strokeStyle = pk.ring; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = '#fde68a'; ctx.textAlign = 'center';
       ctx.fillText(pk.label, q.x, q.y - 11);
     }
-    if (playing && t >= 1 && now > enterTime + (PACKET_MS + HOLD_MS) / speed) advance();
+    if (playing && now > enterTime + ((1 + maxDelay) * PACKET_MS + HOLD_MS) / speed) {
+      advance();
+    }
   } else if (playing && now > enterTime + 500 / speed) {
     advance();
   }

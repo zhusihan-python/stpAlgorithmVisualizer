@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
+import rstp
 import stp
 import topologies
 
@@ -18,7 +19,7 @@ TEMPLATE_PATH = Path(__file__).with_name("template.html")
 DATA_PLACEHOLDER = "__DATA__"
 
 
-def serialize_topology(topology: stp.Topology) -> dict:
+def serialize_topology(topology: stp.Topology, hosts=()) -> dict:
     return {
         "switches": [
             {
@@ -33,13 +34,33 @@ def serialize_topology(topology: stp.Topology) -> dict:
             {"id": link.id(), "a": link.a, "b": link.b, "cost": link.cost}
             for link in topology.links
         ],
+        "hosts": [{"id": h.id, "attached_to": h.attached_to} for h in hosts],
     }
 
 
-def build_document(name: str, topology: stp.Topology):
-    """Run the simulation and return (embedded document, simulation result)."""
+def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
+                   seed: int = 42):
+    """Run the simulation and return (embedded document, summary lines)."""
+    if protocol == "rstp":
+        hosts = [rstp.Host("PC1", topologies.default_host_switch(name, topology, seed))]
+        result = rstp.simulate_rstp(topology, hosts)
+        failure = (f" · 故障演示 {result.failed_link}" if result.failed_link
+                   else " · 无冗余链路，跳过故障演示")
+        document = {
+            "protocol": "rstp",
+            "title": "RSTP（802.1w）逐步动画",
+            "subtitle": (
+                f"拓扑 {name} · {len(topology.switches)} 台交换机 · "
+                f"{len(topology.links)} 条链路 · {len(result.steps)} 步{failure}"
+            ),
+            "topology": serialize_topology(topology, result.hosts),
+            "steps": result.steps,
+        }
+        return document, result
+
     result = stp.simulate(topology)
     document = {
+        "protocol": "stp",
         "title": "经典 STP（802.1D）逐步动画",
         "subtitle": (
             f"拓扑 {name} · {len(topology.switches)} 台交换机 · "
@@ -74,31 +95,45 @@ def main(argv=None) -> None:
         help="seed for the random topology (default: 42)",
     )
     parser.add_argument(
-        "-o", "--output", default="stp.html",
-        help="output HTML file (default: stp.html)",
+        "-p", "--protocol", choices=("stp", "rstp"), default="stp",
+        help="protocol to animate (default: stp)",
+    )
+    parser.add_argument(
+        "-o", "--output", default=None,
+        help="output HTML file (default: stp.html / rstp.html by protocol)",
     )
     parser.add_argument(
         "--json", metavar="FILE",
         help="also dump the raw step data as JSON",
     )
     args = parser.parse_args(argv)
+    output = args.output or (f"{args.protocol}.html")
 
     topology = topologies.BUILDERS[args.topology](args)
     stp.validate(topology)
-    document, result = build_document(args.topology, topology)
+    document, result = build_document(args.topology, topology,
+                                      protocol=args.protocol, seed=args.seed)
 
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    Path(args.output).write_text(render_html(document, template), encoding="utf-8")
+    Path(output).write_text(render_html(document, template), encoding="utf-8")
     if args.json:
         Path(args.json).write_text(
             json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    blocked = len(result.link_roles) - sum(
-        1 for r in result.link_roles.values() if r == "tree")
-    print(f"written: {args.output}")
-    print(f"  topology={args.topology} switches={len(topology.switches)} "
-          f"links={len(topology.links)}")
-    print(f"  steps={len(result.steps)} root={result.root_id} blocked_links={blocked}")
+    print(f"written: {output}")
+    print(f"  protocol={args.protocol} topology={args.topology} "
+          f"switches={len(topology.switches)} links={len(topology.links)}")
+    if args.protocol == "rstp":
+        forwarding = sum(1 for r in result.link_roles.values() if r == "forwarding")
+        alternates = sum(1 for r in result.link_roles.values() if r == "alternate")
+        print(f"  steps={len(result.steps)} root={result.root_id} "
+              f"forwarding={forwarding} alternate={alternates} "
+              f"failed_link={result.failed_link}")
+    else:
+        blocked = len(result.link_roles) - sum(
+            1 for r in result.link_roles.values() if r == "tree")
+        print(f"  steps={len(result.steps)} root={result.root_id} "
+              f"blocked_links={blocked}")
     if args.json:
         print(f"written: {args.json}")
 
