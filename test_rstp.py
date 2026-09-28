@@ -20,7 +20,8 @@ def chain_topology(count=4):
 
 class BootPhaseTests(unittest.TestCase):
     def check_boot(self, topology, hosts=()):
-        result = rstp.simulate_rstp(topology, hosts, include_failure=False)
+        result = rstp.simulate_rstp(topology, hosts, include_failure=False,
+                                    include_link_add=False)
         n = len(topology.switches)
         steps = result.steps
         kinds = [s["kind"] for s in steps]
@@ -105,7 +106,8 @@ class EdgePortTests(unittest.TestCase):
 
 class FailurePhaseTests(unittest.TestCase):
     def check_failure(self, topology):
-        result = rstp.simulate_rstp(topology, include_failure=True)
+        result = rstp.simulate_rstp(topology, include_failure=True,
+                                    include_link_add=False)
         if result.failed_link is None:
             return "skipped"
         n = len(topology.switches)
@@ -150,7 +152,8 @@ class FailurePhaseTests(unittest.TestCase):
 
     def test_no_redundancy_skips_failure(self):
         topology = chain_topology(4)
-        result = rstp.simulate_rstp(topology, include_failure=True)
+        result = rstp.simulate_rstp(topology, include_failure=True,
+                                    include_link_add=False)
         self.assertIsNone(result.failed_link)
         self.assertIn("跳过故障演示", result.steps[-1]["description"])
         self.assertEqual(result.steps[-1]["phase"], "boot-final")
@@ -177,6 +180,111 @@ class PickFailureLinkTests(unittest.TestCase):
         topology = chain_topology(4)
         base = stp.simulate(topology)
         self.assertIsNone(rstp.pick_failure_link(topology, base))
+
+
+def complete_topology(count=3, cost=4):
+    switches = topologies._switches(count, [32768] * count)
+    ids = [s.id for s in switches]
+    links = [stp.Link(a, b, cost)
+             for i, a in enumerate(ids) for b in ids[i + 1:]]
+    return stp.Topology(switches=switches, links=links)
+
+
+class LinkAddTests(unittest.TestCase):
+    def final_roles(self, topology):
+        result = rstp.simulate_rstp(topology)
+        final = stp.Topology(list(topology.switches), result.final_links)
+        fresh = stp.simulate(final)
+        expected = {
+            link.id(): ("forwarding" if fresh.link_roles[link.id()] == "tree"
+                        else "alternate")
+            for link in result.final_links
+        }
+        final_ids = {link.id() for link in result.final_links}
+        if result.failed_link and result.failed_link not in final_ids:
+            expected[result.failed_link] = "down"
+        return result, fresh, expected
+
+    def test_final_equals_fresh_simulation(self):
+        """Master assertion: the whole chained story ends exactly where a
+        fresh run of the algorithm on the final topology would end."""
+        builds = [topologies.triangle, topologies.square_diagonal,
+                  topologies.classic6, chain_topology, complete_topology]
+        for build in builds:
+            result, fresh, expected = self.final_roles(build())
+            last = result.steps[-1]
+            self.assertEqual(last["roles"]["ports"], fresh.port_roles)
+            self.assertEqual(last["roles"]["root"], fresh.root_id)
+            self.assertEqual(result.link_roles, expected)
+        for n in (3, 5, 8, 10):
+            for seed in range(3):
+                self.final_roles(topologies.random_topology(n, seed))
+
+    def test_worse_link_leaves_tree_untouched(self):
+        result = rstp.simulate_rstp(topologies.classic6())
+        self.assertTrue(result.added_links)
+        phases = [s["phase"] for s in result.steps]
+        kinds = [s["kind"] for s in result.steps]
+        worse_final = result.steps[phases.index("link-add-worse-final")]
+        before = result.steps[kinds.index("link-up") - 1]
+        forwarding_before = {lid for lid, s in before["links"].items()
+                             if s == "forwarding"}
+        forwarding_after = {lid for lid, s in worse_final["links"].items()
+                            if s == "forwarding"}
+        self.assertEqual(forwarding_before, forwarding_after,
+                         "a worse link must not change the tree at all")
+        self.assertEqual(worse_final["links"][result.added_links[0]],
+                         "alternate")
+
+    def test_better_link_migrates_root_port(self):
+        result = rstp.simulate_rstp(topologies.classic6())
+        self.assertGreaterEqual(len(result.added_links), 2)
+        phases = [s["phase"] for s in result.steps]
+        worse_final = result.steps[phases.index("link-add-worse-final")]
+        better_final = result.steps[phases.index("link-add-better-final")]
+        migrated = [
+            sid for sid in better_final["roles"]["ports"]
+            if better_final["roles"]["ports"][sid]["root_port"] !=
+            worse_final["roles"]["ports"][sid]["root_port"]
+        ]
+        self.assertTrue(migrated, "the better link must migrate a root port")
+        better_final_links = better_final["links"]
+        self.assertEqual(better_final_links[result.added_links[1]],
+                         "forwarding")
+
+    def test_triangle_repairs_failed_link_without_impact(self):
+        result = rstp.simulate_rstp(topologies.triangle())
+        self.assertEqual(len(result.added_links), 1)
+        self.assertEqual(result.added_links[0], result.failed_link)
+        up = next(s for s in result.steps if s["phase"] == "link-add"
+                  and s["kind"] == "link-up")
+        self.assertIn("修复重连", up["description"])
+
+    def test_link_add_skipped_for_complete_topology_without_failure(self):
+        result = rstp.simulate_rstp(complete_topology(4),
+                                    include_failure=False)
+        self.assertEqual(result.added_links, [])
+        self.assertEqual(result.steps[-1]["phase"], "boot-final")
+
+    def test_phase_order(self):
+        result = rstp.simulate_rstp(topologies.classic6())
+        order = []
+        for step in result.steps:
+            if step["phase"] not in order:
+                order.append(step["phase"])
+        self.assertEqual(
+            order,
+            ["boot", "cascade", "boot-final", "failure",
+             "failure-final", "link-add", "link-add-worse-final",
+             "link-add-better-final"])
+
+    def test_deterministic(self):
+        def doc():
+            return generate.build_document(
+                "classic-6", topologies.classic6(), "rstp", seed=1)[0]
+        import json
+        self.assertEqual(json.dumps(doc(), sort_keys=True),
+                         json.dumps(doc(), sort_keys=True))
 
 
 class DocumentTests(unittest.TestCase):
