@@ -32,6 +32,16 @@
   .controls button.play { background: var(--accent); border-color: var(--accent); min-width: 56px; }
   #counter { color: var(--muted); font-size: 13px; min-width: 96px; text-align: right; }
   main { width: 100%; max-width: 1000px; padding: 0 18px; }
+  .tabs { display: flex; gap: 8px; padding: 0 0 10px; }
+  .tabs button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 16px; font-size: 13.5px; cursor: pointer;
+  }
+  .tabs button.active {
+    background: var(--accent); border-color: var(--accent); font-weight: 600;
+  }
+  .tabs button:hover:not(.active) { border-color: var(--accent); }
+  .tabs button.overlay { border-style: dashed; }
   #stage {
     width: 100%; background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; display: block;
@@ -63,6 +73,33 @@
   #events { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px;
             max-height: 150px; overflow-y: auto; }
   #events li { margin: 2px 0; }
+  .controls button.concept { border-color: #6366f1; color: #c7d2fe; }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(2, 6, 23, .72);
+    display: none; z-index: 50; align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    width: min(92vw, 720px); max-height: 84vh; overflow-y: auto;
+    padding: 18px 26px 22px;
+  }
+  .modal h2 { margin: 0 0 6px; font-size: 17px; }
+  .modal h3 { margin: 14px 0 6px; font-size: 13px; color: #818cf8; }
+  .modal p { font-size: 13.5px; line-height: 1.75; margin: 4px 0; }
+  .modal ul { padding-left: 20px; margin: 4px 0; }
+  .modal li { font-size: 13.5px; line-height: 1.7; margin: 3px 0; }
+  .modal dt { font-weight: 600; font-size: 13.5px; margin-top: 7px; }
+  .modal dd { margin: 1px 0 0 18px; color: var(--muted); font-size: 13px;
+              line-height: 1.6; }
+  .modal .close {
+    float: right; background: none; border: none; color: var(--muted);
+    font-size: 19px; cursor: pointer; padding: 0 4px;
+  }
+  .modal .scenario {
+    color: #c7d2fe; font-size: 13px; line-height: 1.6;
+    border-left: 3px solid #6366f1; padding-left: 10px; margin: 6px 0 2px;
+  }
 </style>
 </head>
 <body>
@@ -82,10 +119,12 @@
       <option value="1" selected>1×</option>
       <option value="2">2×</option>
     </select>
+    <button id="btn-concept" class="concept" title="核心算法思路讲解">📖 原理</button>
     <span id="counter"></span>
   </div>
 </header>
 <main>
+  <div id="tabs" class="tabs" style="display:none"></div>
   <canvas id="stage"></canvas>
   <div class="legend">
     <span><i class="swatch tree"></i>生成树链路（转发）</span>
@@ -104,10 +143,25 @@
   <div class="card"><h3>本轮 BPDU / 结果</h3><ol id="events"></ol></div>
 </footer>
 
+<div id="concept-modal" class="modal-backdrop">
+  <div class="modal">
+    <button class="close" id="concept-close" title="关闭 (Esc)">✕</button>
+    <div id="concept-body"></div>
+  </div>
+</div>
+
 <script>
-const DATA = {"protocol": "rstp", "title": "RSTP（802.1w）逐步动画", "subtitle": "拓扑 triangle · 3 台交换机 · 3 条链路 · 9 步 · 故障演示 S2-S3", "topology": {"switches": [{"id": "S1", "priority": 32768, "mac": "00:00:00:00:00:01", "bridge_id": "32768.00:00:00:00:00:01"}, {"id": "S2", "priority": 32768, "mac": "00:00:00:00:00:02", "bridge_id": "32768.00:00:00:00:00:02"}, {"id": "S3", "priority": 8192, "mac": "00:00:00:00:00:03", "bridge_id": "8192.00:00:00:00:00:03"}], "links": [{"id": "S1-S2", "a": "S1", "b": "S2", "cost": 4}, {"id": "S1-S3", "a": "S1", "b": "S3", "cost": 4}, {"id": "S2-S3", "a": "S2", "b": "S3", "cost": 4}], "hosts": [{"id": "PC1", "attached_to": "S1"}]}, "steps": [{"kind": "initial", "phase": "boot", "round": 0, "description": "RSTP 初始状态：所有交换机以自己为根桥，交换机间端口处于 Discarding（不转发数据）。RSTP 的 BPDU 选举与经典 STP 相同，区别在于端口如何进入转发。边缘端口（PC1→S1）从现在起直接转发，永不参与生成树计算。", "switches": {"S1": {"root": "S1", "cost": 0, "root_port": null}, "S2": {"root": "S2", "cost": 0, "root_port": null}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": []}, {"kind": "round", "round": 1, "description": "第 1 轮 BPDU 交换，2 台交换机更新：S1：根 S1→S3，成本 0→4，根端口 →S3；S2：根 S2→S3，成本 0→4，根端口 →S3。橙色圆点是本轮传输的 BPDU，接收方会再加上本端口的链路成本后比较。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"from": "S1", "to": "S2", "root": "S1", "cost": 0}, {"from": "S2", "to": "S1", "root": "S2", "cost": 0}, {"from": "S1", "to": "S3", "root": "S1", "cost": 0}, {"from": "S3", "to": "S1", "root": "S3", "cost": 0}, {"from": "S2", "to": "S3", "root": "S2", "cost": 0}, {"from": "S3", "to": "S2", "root": "S3", "cost": 0}], "changes": ["S1", "S2"], "phase": "boot"}, {"kind": "round", "round": 2, "description": "第 2 轮 BPDU 交换：BPDU 照常发送，但没有任何交换机更新信息 —— 生成树已收敛。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"from": "S1", "to": "S2", "root": "S3", "cost": 4}, {"from": "S2", "to": "S1", "root": "S3", "cost": 4}, {"from": "S1", "to": "S3", "root": "S3", "cost": 4}, {"from": "S3", "to": "S1", "root": "S3", "cost": 0}, {"from": "S2", "to": "S3", "root": "S3", "cost": 4}, {"from": "S3", "to": "S2", "root": "S3", "cost": 0}], "changes": [], "phase": "boot"}, {"kind": "handshake", "phase": "cascade", "round": 1, "description": "提案/同意握手（1/2）：S3 的指定端口发出提案（Proposal），S1 完成同步后把该端口选为根端口并回送同意（Agreement），链路立即进入转发——没有任何定时器等待。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S3", "to": "S1"}, {"kind": "agreement", "from": "S1", "to": "S3", "delay": 0.6}], "changes": ["S1"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "pending"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "handshake", "phase": "cascade", "round": 2, "description": "提案/同意握手（2/2）：S3 的指定端口发出提案（Proposal），S2 完成同步后把该端口选为根端口并回送同意（Agreement），链路立即进入转发——没有任何定时器等待。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S3", "to": "S2"}, {"kind": "agreement", "from": "S2", "to": "S3", "delay": 0.6}], "changes": ["S2"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "forwarding"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "final", "phase": "boot-final", "round": 2, "description": "启动收敛完成：根桥 S3，2 条树链路通过提案/同意级联依次进入转发（每跳一次往返），其余链路的端口为备用（Alternate）。经典 STP 在此处需要每端口 30–50 秒的监听/学习定时器，RSTP 全程只有消息往返时间。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "blocked", "S1-S3": "tree", "S2-S3": "tree"}, "blocked_ends": {"S1-S2": "S2"}, "ports": {"S1": {"root_port": "S3", "designated": ["S2"], "blocked": []}, "S2": {"root_port": "S3", "designated": [], "blocked": ["S1"]}, "S3": {"root_port": null, "designated": ["S1", "S2"], "blocked": []}}}, "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "forwarding"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "link-down", "phase": "failure", "round": 0, "description": "链路故障：S2–S3 断开。S2 在本地立即检测（物理信号丢失，无定时器）。同步过程中，该链路下游没有其他树链路。边缘端口（PC1→S1）从现在起直接转发，永不参与生成树计算。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": ["S2"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "handshake", "phase": "failure", "round": 1, "description": "S2 的备用端口（→S1）立即提升为根端口——RSTP 不需要重新选举根桥、不等待定时器；提升端口与上游完成提案/同意握手后立即转发。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S1", "to": "S2"}, {"kind": "agreement", "from": "S2", "to": "S1", "delay": 0.6}], "changes": ["S2"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {}}, {"kind": "final", "phase": "failure-final", "round": 1, "description": "故障收敛完成：S2–S3 仍断开，S2 经→S1 的路径到达根桥。整个恢复过程只是几次提案/同意往返（毫秒级）；经典 STP 需要等待 max-age（20s）加监听/学习（30s）约 50 秒。边缘端口全程不受影响。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "tree", "S1-S3": "tree", "S2-S3": "blocked"}, "blocked_ends": {}, "ports": {"S1": {"root_port": "S3", "designated": ["S2"], "blocked": []}, "S2": {"root_port": "S1", "designated": [], "blocked": []}, "S3": {"root_port": null, "designated": ["S1"], "blocked": []}}}, "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {}}]};
+const DATA = {"protocol": "rstp", "title": "RSTP（802.1w）逐步动画", "subtitle": "拓扑 triangle · 3 台交换机 · 3 条链路 · 19 步 · 故障演示 S2-S3 · 新增链路 S2-S3 · 上线 2 台交换机", "topology": {"switches": [{"id": "S1", "priority": 32768, "mac": "00:00:00:00:00:01", "bridge_id": "32768.00:00:00:00:00:01"}, {"id": "S2", "priority": 32768, "mac": "00:00:00:00:00:02", "bridge_id": "32768.00:00:00:00:00:02"}, {"id": "S3", "priority": 8192, "mac": "00:00:00:00:00:03", "bridge_id": "8192.00:00:00:00:00:03"}, {"id": "S4", "priority": 32768, "mac": "00:00:00:00:00:04", "bridge_id": "32768.00:00:00:00:00:04", "appear_at": 12}, {"id": "S5", "priority": 4096, "mac": "00:00:00:00:00:05", "bridge_id": "4096.00:00:00:00:00:05", "appear_at": 16}], "links": [{"id": "S1-S2", "a": "S1", "b": "S2", "cost": 4}, {"id": "S1-S3", "a": "S1", "b": "S3", "cost": 4}, {"id": "S2-S3", "a": "S2", "b": "S3", "cost": 12, "appear_at": 9}, {"id": "S3-S4", "a": "S4", "b": "S3", "cost": 4, "appear_at": 12}, {"id": "S1-S4", "a": "S4", "b": "S1", "cost": 4, "appear_at": 12}, {"id": "S3-S5", "a": "S5", "b": "S3", "cost": 4, "appear_at": 16}, {"id": "S1-S5", "a": "S5", "b": "S1", "cost": 4, "appear_at": 16}], "hosts": [{"id": "PC1", "attached_to": "S1"}]}, "concept": {"title": "快速生成树协议 RSTP（802.1w）核心思路", "problem": "经典 STP 的端口要定时器走完监听/学习两个状态（每端口 30 秒，故障后还要先等 max-age 20 秒）才能转发，一次收敛常要 30–50 秒，对现代网络太慢。", "idea": "选举逻辑与 STP 完全相同（同样的 BPDU、同样的比较规则），差别只在端口如何进入转发：用提案/同意握手替代定时器——指定端口发出提案，下游交换机确认后立刻回送同意，双方立即转发。收敛速度取决于消息沿树逐跳往返的次数，而不是等待时间。", "rules": ["提案/同意握手：指定端口提案 → 下游把它选为根端口并同步（其余端口暂时 Discarding）→ 回送同意 → 该链路立即转发，并继续向下游提案，如此级联到全网", "备用端口（Alternate）：阻塞端口明确登记为备用；根端口故障时立即提升备用端口，不需要重新选举根桥", "新增链路默认两侧 Discarding：劣链路（不提供更优根路径）得不到同意，保持备用、现有树零扰动；只有更优链路才触发根端口迁移与子树重新握手", "新交换机上线：先以自己为根宣告，收到更优 BPDU 立即纠正并握手接入——普通交换机不扰动现有树；桥 ID 更小的新交换机则触发全网根桥迁移，同样只是一轮握手级联", "边缘端口（Edge）：连接主机/终端的端口直接转发、永不参与生成树计算", "端口状态简化为 Discarding / Learning / Forwarding，不再有独立的监听定时器"], "glossary": [["提案 Proposal", "指定端口请求进入转发的握手报文（动画中的黄色圆点）"], ["同意 Agreement", "下游确认后回送的报文（青色圆点），收到即双方转发"], ["同步 Sync", "交换机在同意之前把自己的非边缘端口置于 Discarding，保证不临时成环"], ["备用端口 Alternate", "STP 阻塞端口在 RSTP 中的正式角色，可立即提升为根端口"], ["边缘端口 Edge", "连终端的端口，直接转发且不受拓扑变化影响"]], "scenario": "场景看点（triangle）：三条链路成本相同——观察两件事：根桥由优先级决定（S3 最低）；到根成本相同出现平局时，靠“发送者桥 ID”裁决出唯一的根端口与指定端口，最终恰好阻塞 1 条冗余链路。"}, "steps": [{"kind": "initial", "phase": "boot", "round": 0, "description": "RSTP 初始状态：所有交换机以自己为根桥，交换机间端口处于 Discarding（不转发数据）。RSTP 的 BPDU 选举与经典 STP 相同，区别在于端口如何进入转发。边缘端口（PC1→S1）不受影响。", "switches": {"S1": {"root": "S1", "cost": 0, "root_port": null}, "S2": {"root": "S2", "cost": 0, "root_port": null}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": []}, {"kind": "round", "round": 1, "description": "第 1 轮 BPDU 交换，2 台交换机更新：S1：根 S1→S3，成本 0→4，根端口 →S3；S2：根 S2→S3，成本 0→4，根端口 →S3。橙色圆点是本轮传输的 BPDU，接收方会再加上本端口的链路成本后比较。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"from": "S1", "to": "S2", "root": "S1", "cost": 0}, {"from": "S2", "to": "S1", "root": "S2", "cost": 0}, {"from": "S1", "to": "S3", "root": "S1", "cost": 0}, {"from": "S3", "to": "S1", "root": "S3", "cost": 0}, {"from": "S2", "to": "S3", "root": "S2", "cost": 0}, {"from": "S3", "to": "S2", "root": "S3", "cost": 0}], "changes": ["S1", "S2"], "phase": "boot"}, {"kind": "round", "round": 2, "description": "第 2 轮 BPDU 交换：BPDU 照常发送，但没有任何交换机更新信息 —— 生成树已收敛。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"from": "S1", "to": "S2", "root": "S3", "cost": 4}, {"from": "S2", "to": "S1", "root": "S3", "cost": 4}, {"from": "S1", "to": "S3", "root": "S3", "cost": 4}, {"from": "S3", "to": "S1", "root": "S3", "cost": 0}, {"from": "S2", "to": "S3", "root": "S3", "cost": 4}, {"from": "S3", "to": "S2", "root": "S3", "cost": 0}], "changes": [], "phase": "boot"}, {"kind": "handshake", "phase": "cascade", "round": 1, "description": "提案/同意握手（1/2）：S3 的指定端口发出提案（Proposal），S1 完成同步后把该端口选为根端口并回送同意（Agreement），链路立即进入转发——没有任何定时器等待。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S3", "to": "S1"}, {"kind": "agreement", "from": "S1", "to": "S3", "delay": 0.6}], "changes": ["S1"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "pending"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "handshake", "phase": "cascade", "round": 2, "description": "提案/同意握手（2/2）：S3 的指定端口发出提案（Proposal），S2 完成同步后把该端口选为根端口并回送同意（Agreement），链路立即进入转发——没有任何定时器等待。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S3", "to": "S2"}, {"kind": "agreement", "from": "S2", "to": "S3", "delay": 0.6}], "changes": ["S2"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "forwarding"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "final", "phase": "boot-final", "round": 2, "description": "启动收敛完成：根桥 S3，2 条树链路通过提案/同意级联依次进入转发（每跳一次往返），其余链路的端口为备用（Alternate）。经典 STP 在此处需要每端口 30–50 秒的监听/学习定时器，RSTP 全程只有消息往返时间。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "blocked", "S1-S3": "tree", "S2-S3": "tree"}, "blocked_ends": {"S1-S2": "S2"}, "ports": {"S1": {"root_port": "S3", "designated": ["S2"], "blocked": []}, "S2": {"root_port": "S3", "designated": [], "blocked": ["S1"]}, "S3": {"root_port": null, "designated": ["S1", "S2"], "blocked": []}}}, "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "forwarding"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "link-down", "phase": "failure", "round": 0, "description": "链路故障：S2–S3 断开。S2 在本地立即检测（物理信号丢失，无定时器）。同步过程中，该链路下游没有其他树链路。边缘端口（PC1→S1）不受影响。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 4, "root_port": "S3"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": ["S2"], "links": {"S1-S2": "alternate", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {"S1-S2": "S2"}}, {"kind": "handshake", "phase": "failure", "round": 1, "description": "S2 的备用端口（→S1）立即提升为根端口——RSTP 不需要重新选举根桥、不等待定时器；提升端口与上游完成提案/同意握手后立即转发。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S1", "to": "S2"}, {"kind": "agreement", "from": "S2", "to": "S1", "delay": 0.6}], "changes": ["S2"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {}}, {"kind": "final", "phase": "failure-final", "round": 1, "description": "故障收敛完成：S2–S3 仍断开，S2 经→S1 的路径到达根桥。整个恢复过程只是几次提案/同意往返（毫秒级）；经典 STP 需要等待 max-age（20s）加监听/学习（30s）约 50 秒。边缘端口（PC1→S1）不受影响。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "tree", "S1-S3": "tree", "S2-S3": "blocked"}, "blocked_ends": {}, "ports": {"S1": {"root_port": "S3", "designated": ["S2"], "blocked": []}, "S2": {"root_port": "S1", "designated": [], "blocked": []}, "S3": {"root_port": null, "designated": ["S1"], "blocked": []}}}, "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "down"}, "blocked_ends": {}}, {"kind": "link-up", "phase": "link-add", "round": 0, "description": "之前断开的 S2–S3 链路修复重连。RSTP 中新链路两侧先处于 Discarding：S3 一侧作为指定桥发出提案，等待对方比较。边缘端口（PC1→S1）不受影响。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "pending"}, "blocked_ends": {}}, {"kind": "handshake", "phase": "link-add", "round": 1, "description": "S2 比较（根桥 ID、总成本、发送者桥 ID）后发现经新链路并不更优，于是不回送同意，而是继续宣告自己的信息（根=S3，成本=8）。提案得不到同意，S3 侧保持 Discarding——新链路停在备用，现有树零扰动。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S3", "to": "S2"}, {"kind": "bpdu", "from": "S2", "to": "S3", "delay": 0.6, "root": "S3", "cost": 8}], "changes": ["S2"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate"}, "blocked_ends": {"S2-S3": "S2"}}, {"kind": "final", "phase": "link-add-worse-final", "round": 1, "description": "结论：新增的劣链路对生成树没有任何影响——转发链路一条未变，新链路两侧端口为指定（Discarding）/ 备用。只有当新链路提供更优的根路径时，RSTP 才会触发切换。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "tree", "S1-S3": "tree", "S2-S3": "blocked"}, "blocked_ends": {"S2-S3": "S2"}, "ports": {"S1": {"root_port": "S3", "designated": ["S2"], "blocked": []}, "S2": {"root_port": "S1", "designated": [], "blocked": ["S3"]}, "S3": {"root_port": null, "designated": ["S1", "S2"], "blocked": []}}}, "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate"}, "blocked_ends": {"S2-S3": "S2"}}, {"kind": "switch-online", "phase": "switch-join", "round": 0, "description": "新交换机 S4 上线（桥 ID 32768.00:00:00:00:00:04，上联 S3、S1）。刚启动的交换机和最初一样以自己为根桥，向外宣告（根=S4，成本 0）。边缘端口（PC1→S1）不受影响。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}, "S4": {"root": "S4", "cost": 0, "root_port": null}}, "events": [{"kind": "bpdu", "from": "S4", "to": "S3", "root": "S4", "cost": 0}, {"kind": "bpdu", "from": "S4", "to": "S1", "root": "S4", "cost": 0}], "changes": ["S4"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate", "S3-S4": "pending", "S1-S4": "pending"}, "blocked_ends": {"S2-S3": "S2"}}, {"kind": "handshake", "phase": "switch-join", "round": 1, "description": "邻居们回送更优的 BPDU（根=S3）：S4 立即放弃自封根桥，比较（根、成本、桥 ID）后选出根端口 →S3（成本 4）。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}, "S4": {"root": "S3", "cost": 4, "root_port": "S3"}}, "events": [{"kind": "bpdu", "from": "S3", "to": "S4", "root": "S3", "cost": 0}, {"kind": "bpdu", "from": "S1", "to": "S4", "root": "S3", "cost": 4}], "changes": ["S4"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate", "S3-S4": "pending", "S1-S4": "pending"}, "blocked_ends": {"S2-S3": "S2", "S1-S4": "S4"}}, {"kind": "handshake", "phase": "switch-join", "round": 2, "description": "S3 的提案得到同意，S4 的根端口链路立即转发。对 S1 的上联比较后并不更优，S4 侧端口为备用——双上联形成的环被消除。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}, "S4": {"root": "S3", "cost": 4, "root_port": "S3"}}, "events": [{"kind": "proposal", "from": "S3", "to": "S4"}, {"kind": "agreement", "from": "S4", "to": "S3", "delay": 0.6}], "changes": ["S4"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate", "S3-S4": "forwarding", "S1-S4": "alternate"}, "blocked_ends": {"S2-S3": "S2", "S1-S4": "S4"}}, {"kind": "final", "phase": "switch-join-final", "round": 2, "description": "普通交换机接入完成：全网没有一台既有交换机改变根端口——新交换机只是作为叶子加入生成树，第二条上联保持备用。接入既不选举、也无定时器等待。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}, "S4": {"root": "S3", "cost": 4, "root_port": "S3"}}, "events": [], "changes": [], "roles": {"root": "S3", "links": {"S1-S2": "tree", "S1-S3": "tree", "S2-S3": "blocked", "S3-S4": "tree", "S1-S4": "blocked"}, "blocked_ends": {"S2-S3": "S2", "S1-S4": "S4"}, "ports": {"S1": {"root_port": "S3", "designated": ["S2", "S4"], "blocked": []}, "S2": {"root_port": "S1", "designated": [], "blocked": ["S3"]}, "S3": {"root_port": null, "designated": ["S1", "S2", "S4"], "blocked": []}, "S4": {"root_port": "S3", "designated": [], "blocked": ["S1"]}}}, "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate", "S3-S4": "forwarding", "S1-S4": "alternate"}, "blocked_ends": {"S2-S3": "S2", "S1-S4": "S4"}}, {"kind": "switch-online", "phase": "switch-join-root", "round": 0, "description": "桥 ID 更小的新交换机 S5 上线（桥 ID 4096.00:00:00:00:00:05，上联 S3、S1）并宣告自己为根——这是全网见过的最优信息，将触发根桥迁移。", "switches": {"S1": {"root": "S3", "cost": 4, "root_port": "S3"}, "S2": {"root": "S3", "cost": 8, "root_port": "S1"}, "S3": {"root": "S3", "cost": 0, "root_port": null}, "S4": {"root": "S3", "cost": 4, "root_port": "S3"}, "S5": {"root": "S5", "cost": 0, "root_port": null}}, "events": [{"kind": "bpdu", "from": "S5", "to": "S3", "root": "S5", "cost": 0}, {"kind": "bpdu", "from": "S5", "to": "S1", "root": "S5", "cost": 0}], "changes": ["S5"], "links": {"S1-S2": "forwarding", "S1-S3": "forwarding", "S2-S3": "alternate", "S3-S4": "forwarding", "S1-S4": "alternate", "S3-S5": "pending", "S1-S5": "pending"}, "blocked_ends": {"S2-S3": "S2", "S1-S4": "S4"}}, {"kind": "handshake", "phase": "switch-join-root", "round": 1, "description": "两台上联立刻接受新根并完成提案/同意握手，S5 的端口全部指定转发。其余交换机的根端口指向新根的方向，受影响链路先回到 Discarding 再逐跳重新握手。", "switches": {"S1": {"root": "S5", "cost": 4, "root_port": "S5"}, "S2": {"root": "S5", "cost": 8, "root_port": "S1"}, "S3": {"root": "S5", "cost": 4, "root_port": "S5"}, "S4": {"root": "S5", "cost": 8, "root_port": "S3"}, "S5": {"root": "S5", "cost": 0, "root_port": null}}, "events": [{"kind": "proposal", "from": "S5", "to": "S3", "delay": 0.0}, {"kind": "agreement", "from": "S3", "to": "S5", "delay": 0.6}, {"kind": "proposal", "from": "S5", "to": "S1", "delay": 0.25}, {"kind": "agreement", "from": "S1", "to": "S5", "delay": 0.85}], "changes": ["S5"], "links": {"S1-S2": "forwarding", "S1-S3": "alternate", "S2-S3": "alternate", "S3-S4": "forwarding", "S1-S4": "alternate", "S3-S5": "forwarding", "S1-S5": "forwarding"}, "blocked_ends": {"S1-S3": "S1", "S2-S3": "S2", "S1-S4": "S4"}}, {"kind": "final", "phase": "switch-join-root-final", "round": 1, "description": "根桥迁移完成：新根 S5（桥 ID 4096.00:00:00:00:00:05），2 台交换机改换了根端口方向。即使是这样全网级别的重构，RSTP 也只是提案/同意级联；经典 STP 要等各端口定时器走完，收敛以数十秒计。", "switches": {"S1": {"root": "S5", "cost": 4, "root_port": "S5"}, "S2": {"root": "S5", "cost": 8, "root_port": "S1"}, "S3": {"root": "S5", "cost": 4, "root_port": "S5"}, "S4": {"root": "S5", "cost": 8, "root_port": "S3"}, "S5": {"root": "S5", "cost": 0, "root_port": null}}, "events": [], "changes": [], "roles": {"root": "S5", "links": {"S1-S2": "tree", "S1-S3": "blocked", "S2-S3": "blocked", "S3-S4": "tree", "S1-S4": "blocked", "S3-S5": "tree", "S1-S5": "tree"}, "blocked_ends": {"S1-S3": "S1", "S2-S3": "S2", "S1-S4": "S4"}, "ports": {"S1": {"root_port": "S5", "designated": ["S2", "S4"], "blocked": ["S3"]}, "S2": {"root_port": "S1", "designated": [], "blocked": ["S3"]}, "S3": {"root_port": "S5", "designated": ["S1", "S2", "S4"], "blocked": []}, "S4": {"root_port": "S3", "designated": [], "blocked": ["S1"]}, "S5": {"root_port": null, "designated": ["S1", "S3"], "blocked": []}}}, "links": {"S1-S2": "forwarding", "S1-S3": "alternate", "S2-S3": "alternate", "S3-S4": "forwarding", "S1-S4": "alternate", "S3-S5": "forwarding", "S1-S5": "forwarding"}, "blocked_ends": {"S1-S3": "S1", "S2-S3": "S2", "S1-S4": "S4"}}]};
 const topo = DATA.topology;
-const steps = DATA.steps;
+// Multi-instance protocols (PVST+/MSTP) carry one step list per instance;
+// single-instance protocols keep the flat DATA.steps.
+const INSTANCES = DATA.instances || null;
+const cursors = INSTANCES ? INSTANCES.map(() => 0) : null;
+let instIdx = 0;
+let steps = INSTANCES ? INSTANCES[0].steps : DATA.steps;
+// Overlay comparison view: all instances' converged trees on one canvas.
+let overlayMode = false;
+const INST_COLORS = ['#22c55e', '#38bdf8', '#f472b6'];
 const N = topo.switches.length;
 
 const W = 960, H = 640, R = Math.min(W, H) / 2 - 115;
@@ -156,7 +210,8 @@ function setStep(i, keepPlaying) {
   cur = Math.max(0, Math.min(steps.length - 1, i));
   enterTime = performance.now();
   const st = steps[cur];
-  if (st.kind === 'round' || st.kind === 'handshake') {
+  if (st.kind === 'round' || st.kind === 'handshake' ||
+      st.kind === 'switch-online') {
     packets = st.events.map(e => ({
       from: pos[e.from], to: pos[e.to],
       delay: e.delay || 0, ...packetInfo(e),
@@ -183,9 +238,43 @@ function portLine(sid, st) {
 }
 
 function renderPanels() {
+  if (overlayMode) {
+    $('counter').textContent = '叠加对比视图';
+    const first = JSON.stringify(INSTANCES[0].link_roles);
+    const sameTrees = INSTANCES.every(
+      inst => JSON.stringify(inst.link_roles) === first);
+    $('desc').textContent =
+      '同一物理拓扑上所有实例收敛后的生成树叠加：每种颜色是一个实例的树；' +
+      '并行双色线 = 多个实例都在该链路转发；红 ✕ = 对所有实例都是冗余链路。' +
+      (sameTrees
+        ? '本拓扑各实例的树相同，链路未被分担。'
+        : '不同实例的树使用不同链路——冗余链路为部分实例转发，实现负载分担。');
+    const list = $('events');
+    list.innerHTML = '';
+    INSTANCES.forEach(inst => {
+      const li = document.createElement('li');
+      li.textContent = inst.id +
+        (inst.vlans.length > 1 ? '（VLAN ' + inst.vlans.join(',') + '）' : '') +
+        ' 根桥：' + inst.root_id;
+      list.appendChild(li);
+    });
+    topo.links.forEach(l => {
+      const parts = INSTANCES.map(inst =>
+        inst.link_roles[l.id] === 'tree' ? inst.id + ' 转发' : inst.id + ' 阻塞');
+      const trees = INSTANCES.filter(
+        inst => inst.link_roles[l.id] === 'tree').length;
+      const li = document.createElement('li');
+      li.textContent = l.id.replace('-', '–') + '：' + parts.join('；');
+      if (trees === INSTANCES.length) li.style.color = '#86efac';
+      if (trees === 0) li.style.color = '#fca5a5';
+      list.appendChild(li);
+    });
+    return;
+  }
   const st = steps[cur];
   $('counter').textContent = '第 ' + (cur + 1) + ' / ' + steps.length + ' 步';
-  $('desc').textContent = st.description;
+  $('desc').textContent = st.description +
+    (cur === 0 && DATA.concept ? '（💡 可先点右上角「📖 原理」了解核心思路。）' : '');
   const list = $('events');
   list.innerHTML = '';
   if (st.kind === 'round' || st.kind === 'handshake') {
@@ -222,8 +311,10 @@ function renderPanels() {
 }
 
 function updateButtons() {
-  $('btn-first').disabled = $('btn-prev').disabled = cur === 0;
-  $('btn-next').disabled = $('btn-last').disabled = cur === steps.length - 1;
+  const off = overlayMode;
+  $('btn-first').disabled = $('btn-prev').disabled = off || cur === 0;
+  $('btn-next').disabled = $('btn-last').disabled = off || cur === steps.length - 1;
+  $('btn-play').disabled = off;
   $('btn-play').textContent = playing ? '⏸' : '▶';
 }
 
@@ -250,8 +341,106 @@ function drawX(at, color) {
   ctx.stroke();
 }
 
+function instColor(idx) {
+  return INST_COLORS[idx % INST_COLORS.length];
+}
+
+function drawOverlay() {
+  // Links: one line per forwarding instance (parallel when several), red ✕
+  // when redundant for every instance.
+  for (const l of topo.links) {
+    if (l.appear_at !== undefined && cur < l.appear_at) continue;
+    const p1 = pos[l.a], p2 = pos[l.b];
+    const fwdIdx = [];
+    INSTANCES.forEach((inst, i) => {
+      if (inst.link_roles[l.id] === 'tree') fwdIdx.push(i);
+    });
+    if (fwdIdx.length === 0) {
+      ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.setLineDash([9, 7]);
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      ctx.setLineDash([]);
+      drawX({ x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, '#ef4444');
+    } else {
+      const dx = p2.x - p1.x, dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy);
+      const nx = -dy / len, ny = dx / len;
+      fwdIdx.slice(0, 2).forEach((idx, k) => {
+        const off = fwdIdx.length === 1 ? 0 : (k === 0 ? 3.5 : -3.5);
+        ctx.strokeStyle = instColor(idx); ctx.lineWidth = fwdIdx.length === 1 ? 4 : 3;
+        ctx.beginPath();
+        ctx.moveTo(p1.x + nx * off, p1.y + ny * off);
+        ctx.lineTo(p2.x + nx * off, p2.y + ny * off);
+        ctx.stroke();
+      });
+    }
+    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 - 7 };
+    const costText = '成本 ' + l.cost;
+    ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    const costW = ctx.measureText(costText).width;
+    ctx.fillStyle = 'rgba(30,41,59,.92)';
+    ctx.fillRect(mid.x - costW / 2 - 3, mid.y - 11, costW + 6, 15);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(costText, mid.x, mid.y);
+  }
+
+  // Switches with per-instance root badges.
+  for (const s of topo.switches) {
+    if (s.appear_at !== undefined && cur < s.appear_at) continue;
+    const p = pos[s.id];
+    ctx.beginPath(); ctx.arc(p.x, p.y, NODE_R, 0, 2 * Math.PI);
+    ctx.fillStyle = '#3b82f6'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(s.id, p.x, p.y + 5);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '11px sans-serif';
+    ctx.fillText(s.bridge_id, p.x, p.y + NODE_R + 16);
+    let badge = 0;
+    INSTANCES.forEach((inst, i) => {
+      if (inst.root_id !== s.id) return;
+      const y = p.y - 32 - badge * 16;
+      ctx.fillStyle = instColor(i); ctx.font = 'bold 11px sans-serif';
+      ctx.fillText('★ ' + inst.id, p.x, y);
+      badge++;
+    });
+  }
+
+  // On-canvas legend, top-left.
+  const lx = 16, ly = 14, lw = 200, lh = 30 + (INSTANCES.length + 2) * 20;
+  ctx.fillStyle = 'rgba(15,23,42,.85)';
+  ctx.strokeStyle = '#334155'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(lx, ly, lw, lh, 8); else ctx.rect(lx, ly, lw, lh);
+  ctx.fill(); ctx.stroke();
+  let yy = ly + 24;
+  ctx.textAlign = 'left'; ctx.font = '11.5px sans-serif';
+  INSTANCES.forEach((inst, i) => {
+    ctx.strokeStyle = instColor(i); ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(lx + 12, yy - 4); ctx.lineTo(lx + 40, yy - 4); ctx.stroke();
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText(inst.id + '（单色=仅此实例转发）', lx + 48, yy);
+    yy += 20;
+  });
+  ctx.strokeStyle = instColor(0); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 7); ctx.lineTo(lx + 40, yy - 7); ctx.stroke();
+  ctx.strokeStyle = instColor(1); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 1); ctx.lineTo(lx + 40, yy - 1); ctx.stroke();
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText('并行双色=多实例转发', lx + 48, yy);
+  yy += 20;
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.setLineDash([6, 5]);
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 4); ctx.lineTo(lx + 40, yy - 4); ctx.stroke();
+  ctx.setLineDash([]);
+  drawX({ x: lx + 26, y: yy - 4 }, '#ef4444');
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText('全实例冗余（阻塞）', lx + 48, yy);
+}
+
 function draw(now) {
   ctx.clearRect(0, 0, W, H);
+  if (overlayMode) {
+    drawOverlay();
+    requestAnimationFrame(draw);
+    return;
+  }
   const st = steps[cur];
   const isFinal = st.kind === 'final';
   // RSTP steps carry an explicit per-step link-state map; classic STP only
@@ -260,6 +449,7 @@ function draw(now) {
   const blockedEnds = st.blocked_ends || (isFinal && st.roles ? st.roles.blocked_ends : null);
 
   for (const l of topo.links) {
+    if (l.appear_at !== undefined && cur < l.appear_at) continue;
     const p1 = pos[l.a], p2 = pos[l.b];
     const role = stateMap ? stateMap[l.id] : null;
     let color = '#475569', width = 2, dash = [];
@@ -310,6 +500,8 @@ function draw(now) {
   }
 
   for (const s of topo.switches) {
+    if (s.appear_at !== undefined && cur < s.appear_at) continue;
+    if (!st.switches[s.id]) continue;   // not part of the story yet
     const p = pos[s.id];
     const info = st.switches[s.id];
     const isRoot = isFinal && st.roles.root === s.id;
@@ -328,7 +520,8 @@ function draw(now) {
     ctx.fillText(portLine(s.id, st), p.x, p.y + NODE_R + 32);
   }
 
-  if (st.kind === 'round' || st.kind === 'handshake') {
+  if (st.kind === 'round' || st.kind === 'handshake' ||
+      st.kind === 'switch-online') {
     let maxDelay = 0;
     for (const pk of packets) maxDelay = Math.max(maxDelay, pk.delay);
     ctx.font = '10px sans-serif';
@@ -368,6 +561,7 @@ $('btn-play').onclick = () => {
 $('speed').onchange = e => { speed = parseFloat(e.target.value); };
 
 document.addEventListener('keydown', e => {
+  if (overlayMode) return;
   if (e.key === 'ArrowLeft') { setStep(cur - 1); e.preventDefault(); }
   else if (e.key === 'ArrowRight') { setStep(cur + 1); e.preventDefault(); }
   else if (e.key === ' ') { $('btn-play').click(); e.preventDefault(); }
@@ -375,8 +569,84 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'End') { setStep(steps.length - 1); e.preventDefault(); }
 });
 
+function buildTabs() {
+  if (!INSTANCES) return;
+  const holder = $('tabs');
+  holder.style.display = 'flex';
+  INSTANCES.forEach((inst, i) => {
+    const btn = document.createElement('button');
+    btn.textContent = inst.id +
+      (inst.vlans.length > 1 ? '（VLAN ' + inst.vlans.join(',') + '）' : '');
+    btn.onclick = () => switchInstance(i);
+    holder.appendChild(btn);
+  });
+  const overlayBtn = document.createElement('button');
+  overlayBtn.className = 'overlay';
+  overlayBtn.textContent = '叠加对比';
+  overlayBtn.onclick = () => switchInstance(INSTANCES.length);
+  holder.appendChild(overlayBtn);
+  updateTabs();
+}
+
+function updateTabs() {
+  if (!INSTANCES) return;
+  [...$('tabs').children].forEach((btn, i) =>
+    btn.classList.toggle('active', overlayMode ? i === INSTANCES.length
+                                               : i === instIdx));
+}
+
+function switchInstance(i) {
+  if (!INSTANCES) return;
+  if (i === INSTANCES.length) {         // overlay comparison tab
+    cursors[instIdx] = cur;
+    overlayMode = true;
+    playing = false;
+    enterTime = performance.now();
+    renderPanels();
+    updateButtons();
+    updateTabs();
+    return;
+  }
+  if (i === instIdx && !overlayMode) return;
+  cursors[instIdx] = cur;
+  overlayMode = false;
+  instIdx = i;
+  steps = INSTANCES[i].steps;
+  playing = false;
+  setStep(cursors[i]);
+  updateTabs();
+}
+
+function buildConceptModal() {
+  const modal = $('concept-modal');
+  if (!DATA.concept) { $('btn-concept').style.display = 'none'; return; }
+  const c = DATA.concept;
+  let html = '<h2>' + c.title + '</h2>';
+  if (c.scenario) html += '<p class="scenario">' + c.scenario + '</p>';
+  html += '<h3>要解决的问题</h3><p>' + c.problem + '</p>';
+  html += '<h3>核心思路</h3><p>' + c.idea + '</p>';
+  if (c.rules) {
+    html += '<h3>关键规则</h3><ul>' +
+            c.rules.map(r => '<li>' + r + '</li>').join('') + '</ul>';
+  }
+  if (c.glossary) {
+    html += '<h3>术语速查</h3><dl>' +
+            c.glossary.map(g => '<dt>' + g[0] + '</dt><dd>' + g[1] + '</dd>')
+                      .join('') + '</dl>';
+  }
+  $('concept-body').innerHTML = html;
+  $('btn-concept').onclick = () => modal.classList.add('open');
+  modal.onclick = e => { if (e.target === modal) modal.classList.remove('open'); };
+  $('concept-close').onclick = () => modal.classList.remove('open');
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') modal.classList.remove('open');
+  });
+}
+
 $('title').textContent = DATA.title;
 $('subtitle').textContent = DATA.subtitle;
+buildConceptModal();
+buildTabs();
 setStep(0);
 requestAnimationFrame(draw);
 </script>

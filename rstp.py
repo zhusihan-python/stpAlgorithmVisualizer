@@ -54,8 +54,11 @@ class RstpResult:
     hosts: List[Host]
     failed_link: Optional[str]      # link id, or None if no failure phase
     added_links: List[str] = field(default_factory=list)  # ids of added links
+    joined_switches: List[str] = field(default_factory=list)
     link_roles: Dict[str, str] = field(default_factory=dict)
-    final_links: List[stp.Link] = field(default_factory=list)  # cumulative
+    final_topology: Optional[stp.Topology] = None  # cumulative, incl. joins
+    # step index at which each added link / joined switch first appears
+    appear: Dict[str, int] = field(default_factory=dict)
 
 
 def validate_hosts(topology: stp.Topology, hosts) -> None:
@@ -400,6 +403,277 @@ def _better_link_phase(topology: stp.Topology, sim: stp.SimulationResult,
     return sim3
 
 
+# --------------------------------------------------------------------------
+# Switch-join scenarios
+
+def _join_switch(topology: stp.Topology, priority: int) -> stp.Switch:
+    num = max(int(s.id[1:]) for s in topology.switches) + 1
+    mac = "00:00:00:00:{:02x}:{:02x}".format(num // 256, num % 256)
+    return stp.Switch(id=f"S{num}", priority=priority, mac=mac)
+
+
+def _attach_targets(topology: stp.Topology, sim: stp.SimulationResult
+                    ) -> List[str]:
+    """Attach a joining switch to the root plus its cheapest tree neighbour.
+
+    The second uplink is only included when that neighbour's root cost is
+    low enough (<= 8 with two cost-4 uplinks) to guarantee the join does
+    not reroute anyone — that is the teaching point of the normal join."""
+    root = sim.root_id
+    neighbours = sim.port_roles[root]["designated"]  # root designates all links
+    cheapest = min(
+        neighbours,
+        key=lambda sid: (sim.steps[-1]["switches"][sid]["cost"], sid))
+    if sim.steps[-1]["switches"][cheapest]["cost"] > 2 * COST_NEW_LINK:
+        return [root]
+    return [root, cheapest]
+
+
+def _join_states(sim: stp.SimulationResult, switch: stp.Switch) -> dict:
+    """Converged states of the existing network plus the fresh switch that
+    still believes itself to be the root."""
+    states = dict(sim.steps[-1]["switches"])
+    states[switch.id] = {"root": switch.id, "cost": 0, "root_port": None}
+    return states
+
+
+def _normal_join_phase(topology: stp.Topology, sim: stp.SimulationResult,
+                       switch: stp.Switch, targets: List[str],
+                       steps: List[dict], link_state: Dict[str, str],
+                       edge_note: str) -> stp.SimulationResult:
+    """A fresh, higher-ID switch dual-homes into the network: its self-root
+    claim is overridden immediately, one uplink becomes its root port, the
+    other stays alternate — nobody else changes."""
+    links = [stp.Link(switch.id, t, COST_NEW_LINK) for t in targets]
+    topo2 = stp.Topology(list(topology.switches) + [switch],
+                         topology.links + links)
+    sim2 = stp.simulate(topo2)
+    states = sim2.steps[-1]["switches"]
+
+    root_port_link = next(l for l in links
+                          if sim2.link_roles[l.id()] == "tree")
+    alternate_links = [l for l in links if l.id() != root_port_link.id()]
+    root_target = root_port_link.other(switch.id)
+
+    up_state = dict(link_state)
+    for link in links:
+        up_state[link.id()] = "pending"
+    steps.append({
+        "kind": "switch-online",
+        "phase": "switch-join",
+        "round": 0,
+        "description": (
+            f"新交换机 {switch.id} 上线（桥 ID {switch.bridge_id}，上联 "
+            f"{'、'.join(targets)}）。刚启动的交换机和最初一样以自己为根桥，"
+            f"向外宣告（根={switch.id}，成本 0）。{edge_note}"
+        ),
+        "switches": _join_states(sim, switch),
+        "events": [{"kind": "bpdu", "from": switch.id, "to": t,
+                    "root": switch.id, "cost": 0} for t in targets],
+        "changes": [switch.id],
+        "links": up_state,
+        "blocked_ends": dict(sim.blocked_ends),
+    })
+
+    correction = dict(up_state)
+    steps.append({
+        "kind": "handshake",
+        "phase": "switch-join",
+        "round": 1,
+        "description": (
+            f"邻居们回送更优的 BPDU（根={sim.root_id}）：{switch.id} 立即放弃"
+            f"自封根桥，比较（根、成本、桥 ID）后选出根端口 →{root_target}"
+            f"（成本 {states[switch.id]['cost']}）。"
+        ),
+        "switches": states,
+        "events": [
+            {"kind": "bpdu", "from": t, "to": switch.id,
+             "root": states[t]["root"], "cost": states[t]["cost"]}
+            for t in targets
+        ],
+        "changes": [switch.id],
+        "links": correction,
+        "blocked_ends": dict(sim2.blocked_ends),
+    })
+
+    settled = dict(correction)
+    settled[root_port_link.id()] = "forwarding"
+    for link in alternate_links:
+        settled[link.id()] = "alternate"
+    settle_events = [
+        {"kind": "proposal", "from": root_target, "to": switch.id},
+        {"kind": "agreement", "from": switch.id, "to": root_target,
+         "delay": 0.6},
+    ]
+    settle_text = (
+        f"{root_target} 的提案得到同意，{switch.id} 的根端口链路立即转发。"
+        if alternate_links else
+        f"{root_target} 的提案得到同意，{switch.id} 的唯一上联立即转发。"
+    )
+    if alternate_links:
+        settle_text += (
+            f"对 {alternate_links[0].other(switch.id)} 的上联比较后并不更优，"
+            f"{switch.id} 侧端口为备用——双上联形成的环被消除。"
+        )
+    steps.append({
+        "kind": "handshake",
+        "phase": "switch-join",
+        "round": 2,
+        "description": settle_text,
+        "switches": states,
+        "events": settle_events,
+        "changes": [switch.id],
+        "links": settled,
+        "blocked_ends": sim2.blocked_ends,
+    })
+
+    steps.append({
+        "kind": "final",
+        "phase": "switch-join-final",
+        "round": 2,
+        "description": (
+            f"普通交换机接入完成：全网没有一台既有交换机改变根端口——新交换机"
+            "只是作为叶子加入生成树，第二条上联保持备用。接入既不选举、"
+            "也无定时器等待。"
+        ),
+        "switches": states,
+        "events": [],
+        "changes": [],
+        "roles": {
+            "root": sim2.root_id,
+            "links": {lid: ("tree" if s == "forwarding" else "blocked")
+                      for lid, s in settled.items()},
+            "blocked_ends": sim2.blocked_ends,
+            "ports": sim2.port_roles,
+        },
+        "links": settled,
+        "blocked_ends": sim2.blocked_ends,
+    })
+    return sim2
+
+
+def _root_join_phase(topology: stp.Topology, sim: stp.SimulationResult,
+                     switch: stp.Switch, targets: List[str],
+                     steps: List[dict], link_state: Dict[str, str]
+                     ) -> stp.SimulationResult:
+    """A joining switch with the lowest bridge ID becomes the new root: the
+    whole network re-orients through handshakes, no timers."""
+    links = [stp.Link(switch.id, t, COST_NEW_LINK) for t in targets]
+    topo3 = stp.Topology(list(topology.switches) + [switch],
+                         topology.links + links)
+    sim3 = stp.simulate(topo3)
+    states = sim3.steps[-1]["switches"]
+
+    changed = [sid for sid in states
+               if sim3.port_roles[sid]["root_port"] !=
+               sim.port_roles.get(sid, {}).get("root_port")]
+
+    up_state = dict(link_state)
+    for link in links:
+        up_state[link.id()] = "pending"
+    steps.append({
+        "kind": "switch-online",
+        "phase": "switch-join-root",
+        "round": 0,
+        "description": (
+            f"桥 ID 更小的新交换机 {switch.id} 上线（桥 ID {switch.bridge_id}，"
+            f"上联 {'、'.join(targets)}）并宣告自己为根——这是全网见过的最优"
+            "信息，将触发根桥迁移。"
+        ),
+        "switches": _join_states(sim, switch),
+        "events": [{"kind": "bpdu", "from": switch.id, "to": t,
+                    "root": switch.id, "cost": 0} for t in targets],
+        "changes": [switch.id],
+        "links": up_state,
+        "blocked_ends": dict(sim.blocked_ends),
+    })
+
+    flips = [lid for lid, role in sim3.link_roles.items()
+             if role == "blocked" and sim.link_roles.get(lid) == "tree"]
+    cascade = _tree_bfs_order(topo3, sim3, sim3.root_id)
+    attach_ids = {l.id() for l in links}
+    pending = [l.id() for l, _, child in cascade
+               if child in changed and l.id() not in attach_ids]
+
+    settled = dict(up_state)
+    for link in links:
+        settled[link.id()] = "forwarding"
+    for lid in flips:
+        settled[lid] = "alternate"
+    for lid in pending:
+        settled[lid] = "pending"
+    events = []
+    for i, link in enumerate(links):
+        peer = link.other(switch.id)
+        events.append({"kind": "proposal", "from": switch.id, "to": peer,
+                       "delay": 0.25 * i})
+        events.append({"kind": "agreement", "from": peer, "to": switch.id,
+                       "delay": 0.25 * i + 0.6})
+    steps.append({
+        "kind": "handshake",
+        "phase": "switch-join-root",
+        "round": 1,
+        "description": (
+            f"两台上联立刻接受新根并完成提案/同意握手，{switch.id} 的端口全部"
+            "指定转发。其余交换机的根端口指向新根的方向，受影响链路先回到 "
+            "Discarding 再逐跳重新握手。"
+        ),
+        "switches": states,
+        "events": events,
+        "changes": [switch.id],
+        "links": settled,
+        "blocked_ends": sim3.blocked_ends,
+    })
+
+    resync = dict(settled)
+    resync_steps = [(l, p, child) for l, p, child in cascade
+                    if child in changed and l.id() not in attach_ids]
+    for i, (link, p, child) in enumerate(resync_steps, 2):
+        resync[link.id()] = "forwarding"
+        steps.append({
+            "kind": "handshake",
+            "phase": "switch-join-root",
+            "round": i,
+            "description": (
+                f"全网重新定向（{i}/{len(resync_steps) + 1}）：{p} 向 {child} "
+                "提案，同意后该链路按新树恢复转发。"
+            ),
+            "switches": states,
+            "events": [
+                {"kind": "proposal", "from": p, "to": child},
+                {"kind": "agreement", "from": child, "to": p, "delay": 0.6},
+            ],
+            "changes": [child],
+            "links": dict(resync),
+            "blocked_ends": sim3.blocked_ends,
+        })
+
+    steps.append({
+        "kind": "final",
+        "phase": "switch-join-root-final",
+        "round": len(resync_steps) + 1,
+        "description": (
+            f"根桥迁移完成：新根 {switch.id}（桥 ID {switch.bridge_id}），"
+            f"{len(changed)} 台交换机改换了根端口方向。即使是这样全网级别的"
+            "重构，RSTP 也只是提案/同意级联；经典 STP 要等各端口定时器走完，"
+            "收敛以数十秒计。"
+        ),
+        "switches": states,
+        "events": [],
+        "changes": [],
+        "roles": {
+            "root": sim3.root_id,
+            "links": {lid: ("tree" if s == "forwarding" else "blocked")
+                      for lid, s in resync.items()},
+            "blocked_ends": sim3.blocked_ends,
+            "ports": sim3.port_roles,
+        },
+        "links": resync,
+        "blocked_ends": sim3.blocked_ends,
+    })
+    return sim3
+
+
 def _link_between(topology: stp.Topology, a: str, b: str) -> stp.Link:
     for link in topology.links:
         if link.pair() == tuple(sorted((a, b))):
@@ -409,7 +683,8 @@ def _link_between(topology: stp.Topology, a: str, b: str) -> stp.Link:
 
 def simulate_rstp(topology: stp.Topology, hosts=(),
                   include_failure: bool = True,
-                  include_link_add: bool = True) -> RstpResult:
+                  include_link_add: bool = True,
+                  include_switch_join: bool = True) -> RstpResult:
     """Boot convergence, then every topology-change story in sequence
     (each skipped automatically when the topology cannot show it)."""
     stp.validate(topology)
@@ -615,9 +890,11 @@ def simulate_rstp(topology: stp.Topology, hosts=(),
 
     # ---- Phase 4: link-add demonstrations (worse, then better) ----
     added_ids: List[str] = []
+    appear: Dict[str, int] = {}
     if include_link_add:
         worse, better = _pick_added_links(topo_now, sim_now)
         if worse is not None:
+            appear[worse.id()] = len(steps)
             sim_now = _worse_link_phase(
                 topo_now, sim_now, worse, steps, ls_now, edge_note,
                 repair_of=failed_link_id)
@@ -626,11 +903,43 @@ def simulate_rstp(topology: stp.Topology, hosts=(),
             ls_now = {lid: s for lid, s in steps[-1]["links"].items()}
             added_ids.append(worse.id())
         if better is not None:
+            appear[better.id()] = len(steps)
             sim_now = _better_link_phase(topo_now, sim_now, better, steps, ls_now)
             topo_now = stp.Topology(list(topo_now.switches),
                                     topo_now.links + [better])
             ls_now = {lid: s for lid, s in steps[-1]["links"].items()}
             added_ids.append(better.id())
+
+    # ---- Phase 5: switch joins (normal leaf, then root migration) ----
+    joined_ids: List[str] = []
+    if include_switch_join:
+        normal = _join_switch(topo_now, 32768)
+        targets = _attach_targets(topo_now, sim_now)
+        appear[normal.id] = len(steps)
+        for t in targets:
+            appear["-".join(sorted((normal.id, t)))] = len(steps)
+        sim_now = _normal_join_phase(topo_now, sim_now, normal, targets,
+                                     steps, ls_now, edge_note)
+        topo_now = stp.Topology(
+            list(topo_now.switches) + [normal],
+            topo_now.links + [stp.Link(normal.id, t, COST_NEW_LINK)
+                              for t in targets])
+        ls_now = {lid: s for lid, s in steps[-1]["links"].items()}
+        joined_ids.append(normal.id)
+
+        changer = _join_switch(topo_now, 4096)
+        targets2 = _attach_targets(topo_now, sim_now)
+        appear[changer.id] = len(steps)
+        for t in targets2:
+            appear["-".join(sorted((changer.id, t)))] = len(steps)
+        sim_now = _root_join_phase(topo_now, sim_now, changer, targets2,
+                                   steps, ls_now)
+        topo_now = stp.Topology(
+            list(topo_now.switches) + [changer],
+            topo_now.links + [stp.Link(changer.id, t, COST_NEW_LINK)
+                              for t in targets2])
+        ls_now = {lid: s for lid, s in steps[-1]["links"].items()}
+        joined_ids.append(changer.id)
 
     return RstpResult(
         steps=steps,
@@ -638,6 +947,8 @@ def simulate_rstp(topology: stp.Topology, hosts=(),
         hosts=hosts,
         failed_link=failed_link_id,
         added_links=added_ids,
+        joined_switches=joined_ids,
         link_roles=dict(ls_now),
-        final_links=list(topo_now.links),
+        final_topology=topo_now,
+        appear=appear,
     )

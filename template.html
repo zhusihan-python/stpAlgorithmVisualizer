@@ -210,7 +210,8 @@ function setStep(i, keepPlaying) {
   cur = Math.max(0, Math.min(steps.length - 1, i));
   enterTime = performance.now();
   const st = steps[cur];
-  if (st.kind === 'round' || st.kind === 'handshake') {
+  if (st.kind === 'round' || st.kind === 'handshake' ||
+      st.kind === 'switch-online') {
     packets = st.events.map(e => ({
       from: pos[e.from], to: pos[e.to],
       delay: e.delay || 0, ...packetInfo(e),
@@ -348,6 +349,7 @@ function drawOverlay() {
   // Links: one line per forwarding instance (parallel when several), red ✕
   // when redundant for every instance.
   for (const l of topo.links) {
+    if (l.appear_at !== undefined && cur < l.appear_at) continue;
     const p1 = pos[l.a], p2 = pos[l.b];
     const fwdIdx = [];
     INSTANCES.forEach((inst, i) => {
@@ -383,6 +385,7 @@ function drawOverlay() {
 
   // Switches with per-instance root badges.
   for (const s of topo.switches) {
+    if (s.appear_at !== undefined && cur < s.appear_at) continue;
     const p = pos[s.id];
     ctx.beginPath(); ctx.arc(p.x, p.y, NODE_R, 0, 2 * Math.PI);
     ctx.fillStyle = '#3b82f6'; ctx.fill();
@@ -446,6 +449,7 @@ function draw(now) {
   const blockedEnds = st.blocked_ends || (isFinal && st.roles ? st.roles.blocked_ends : null);
 
   for (const l of topo.links) {
+    if (l.appear_at !== undefined && cur < l.appear_at) continue;
     const p1 = pos[l.a], p2 = pos[l.b];
     const role = stateMap ? stateMap[l.id] : null;
     let color = '#475569', width = 2, dash = [];
@@ -496,6 +500,8 @@ function draw(now) {
   }
 
   for (const s of topo.switches) {
+    if (s.appear_at !== undefined && cur < s.appear_at) continue;
+    if (!st.switches[s.id]) continue;   // not part of the story yet
     const p = pos[s.id];
     const info = st.switches[s.id];
     const isRoot = isFinal && st.roles.root === s.id;
@@ -514,7 +520,8 @@ function draw(now) {
     ctx.fillText(portLine(s.id, st), p.x, p.y + NODE_R + 32);
   }
 
-  if (st.kind === 'round' || st.kind === 'handshake') {
+  if (st.kind === 'round' || st.kind === 'handshake' ||
+      st.kind === 'switch-online') {
     let maxDelay = 0;
     for (const pk of packets) maxDelay = Math.max(maxDelay, pk.delay);
     ctx.font = '10px sans-serif';

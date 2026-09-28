@@ -21,7 +21,12 @@ TEMPLATE_PATH = Path(__file__).with_name("template.html")
 DATA_PLACEHOLDER = "__DATA__"
 
 
-def serialize_topology(topology: stp.Topology, hosts=()) -> dict:
+def serialize_topology(topology: stp.Topology, hosts=(), appear=None) -> dict:
+    """Serialize a topology; `appear` marks links/switches that join the
+    story mid-animation with the step index at which they appear."""
+    def appear_at(key):
+        return {"appear_at": appear[key]} if appear and key in appear else {}
+
     return {
         "switches": [
             {
@@ -29,11 +34,13 @@ def serialize_topology(topology: stp.Topology, hosts=()) -> dict:
                 "priority": s.priority,
                 "mac": s.mac,
                 "bridge_id": s.bridge_id,
+                **appear_at(s.id),
             }
             for s in topology.switches
         ],
         "links": [
-            {"id": link.id(), "a": link.a, "b": link.b, "cost": link.cost}
+            {"id": link.id(), "a": link.a, "b": link.b, "cost": link.cost,
+             **appear_at(link.id())}
             for link in topology.links
         ],
         "hosts": [{"id": h.id, "attached_to": h.attached_to} for h in hosts],
@@ -71,15 +78,18 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
                    else " · 无冗余链路，跳过故障演示")
         added = (f" · 新增链路 {'、'.join(result.added_links)}"
                  if result.added_links else "")
+        joined = (f" · 上线 {len(result.joined_switches)} 台交换机"
+                  if result.joined_switches else "")
         document = {
             "protocol": "rstp",
             "title": "RSTP（802.1w）逐步动画",
             "subtitle": (
                 f"拓扑 {name} · {len(topology.switches)} 台交换机 · "
                 f"{len(topology.links)} 条链路 · {len(result.steps)} 步"
-                f"{failure}{added}"
+                f"{failure}{added}{joined}"
             ),
-            "topology": serialize_topology(topology, result.hosts),
+            "topology": serialize_topology(result.final_topology,
+                                           result.hosts, result.appear),
             "concept": concept,
             "steps": result.steps,
         }
@@ -162,7 +172,8 @@ def main(argv=None) -> None:
         print(f"  steps={len(result.steps)} root={result.root_id} "
               f"forwarding={forwarding} alternate={alternates} "
               f"failed_link={result.failed_link} "
-              f"added_links={','.join(result.added_links) or '-'}")
+              f"added_links={','.join(result.added_links) or '-'} "
+              f"joined={','.join(result.joined_switches) or '-'}")
     else:
         blocked = len(result.link_roles) - sum(
             1 for r in result.link_roles.values() if r == "tree")
