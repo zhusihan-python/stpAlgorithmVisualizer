@@ -1,5 +1,5 @@
-import turtle
 import math
+import turtle
 
 
 # Constants
@@ -9,214 +9,179 @@ EDGE_COLOR = "black"
 NODE_COLOR = "blue"
 TEXT_COLOR = "black"
 DRAW_SPEED = 3  # Speed of the drawing animation
-
-# Function to draw a node
-def draw_node(turtle, x, y, label):
-    turtle.penup()
-    turtle.goto(x, y - NODE_RADIUS)
-    turtle.pendown()
-    turtle.begin_fill()
-    turtle.circle(NODE_RADIUS)
-    turtle.end_fill()
-    turtle.penup()
-    turtle.goto(x, y - NODE_RADIUS - 20)
-    turtle.write(label, align="center", font=("Arial", 10, "normal"))
-
-# Function to draw an edge between two nodes
-def draw_edge(turtle, x1, y1, x2, y2):
-    turtle.penup()
-    turtle.goto(x1, y1 - NODE_RADIUS)
-    turtle.pendown()
-    turtle.goto(x2, y2 - NODE_RADIUS)
-
-# Function to draw an edge between two nodes with animation
-def draw_edge_with_animation(turtle, x1, y1, x2, y2):
-    turtle.penup()
-    turtle.goto(x1, y1 - NODE_RADIUS)
-    turtle.pendown()
-    turtle.speed(DRAW_SPEED)  # Set the speed for animation
-    turtle.goto(x2, y2 - NODE_RADIUS)
+MIN_NODES = 3  # Smallest topology worth drawing
 
 
-# Function to draw the spanning tree resulting from RSTP with animation
+# Layout helpers (pure geometry/topology, testable without a GUI)
+def circle_positions(num_nodes, distance=NODE_DISTANCE):
+    """Positions of nodes evenly spaced on a circle centered at the origin."""
+    return [
+        (distance * math.cos(2 * math.pi * i / num_nodes),
+         distance * math.sin(2 * math.pi * i / num_nodes))
+        for i in range(num_nodes)
+    ]
+
+
+def ring_edges(num_nodes):
+    """Edges of a ring topology: consecutive nodes plus a closing edge."""
+    return [(i - 1, i) for i in range(1, num_nodes)] + [(num_nodes - 1, 0)]
+
+
+def star_edges(num_nodes):
+    """Edges of a star topology: every node connected to node 0."""
+    return [(0, i) for i in range(1, num_nodes)]
+
+
+def grid_dimensions(num_nodes):
+    """Grid size that fits num_nodes in a shape as square as possible."""
+    rows = max(int(math.sqrt(num_nodes)), 1)
+    cols = math.ceil(num_nodes / rows)
+    return rows, cols
+
+
+def grid_positions(num_nodes, distance=NODE_DISTANCE):
+    """Positions of all num_nodes in a centered row-major grid."""
+    rows, cols = grid_dimensions(num_nodes)
+    positions = []
+    for i in range(num_nodes):
+        row, col = divmod(i, cols)
+        x = (col - (cols - 1) / 2) * distance
+        y = ((rows - 1) / 2 - row) * distance
+        positions.append((x, y))
+    return positions
+
+
+def grid_edges(num_nodes):
+    """Edges between horizontally and vertically adjacent grid nodes."""
+    _, cols = grid_dimensions(num_nodes)
+    edges = []
+    for i in range(num_nodes):
+        if i % cols < cols - 1 and i + 1 < num_nodes:
+            edges.append((i, i + 1))
+        if i + cols < num_nodes:
+            edges.append((i, i + cols))
+    return edges
+
+
+def edge_endpoints(p1, p2, radius=NODE_RADIUS):
+    """Trim the segment p1-p2 so it starts and ends on the node borders."""
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    length = math.hypot(dx, dy)
+    ux, uy = dx / length, dy / length
+    start = (p1[0] + ux * radius, p1[1] + uy * radius)
+    end = (p2[0] - ux * radius, p2[1] - uy * radius)
+    return start, end
+
+
+# Drawing primitives
+def draw_node(t, x, y, label):
+    t.penup()
+    t.goto(x, y - NODE_RADIUS)
+    t.pendown()
+    t.fillcolor(NODE_COLOR)
+    t.begin_fill()
+    t.circle(NODE_RADIUS)
+    t.end_fill()
+    t.penup()
+    t.goto(x, y - NODE_RADIUS - 20)
+    t.write(label, align="center", font=("Arial", 10, "normal"))
+
+
+def draw_edge_with_animation(t, p1, p2):
+    start, end = edge_endpoints(p1, p2)
+    t.penup()
+    t.goto(*start)
+    t.pendown()
+    t.speed(DRAW_SPEED)  # Set the speed for animation
+    t.goto(*end)
+
+
+def draw_topology(positions, edges, title, description):
+    """Draw the nodes and edges, add the title/description, keep the window open."""
+    screen = turtle.Screen()
+    screen.setup(width=1.0, height=1.0)  # Fullscreen
+    screen.bgcolor("white")
+
+    t = turtle.Turtle()
+    t.speed(0)  # Set the drawing speed to the maximum
+    t.color(EDGE_COLOR)
+
+    for i, (x, y) in enumerate(positions):
+        draw_node(t, x, y, str(i))
+
+    for i, j in edges:
+        draw_edge_with_animation(t, positions[i], positions[j])
+
+    # Add text to explain what's going on
+    text_turtle = turtle.Turtle()
+    text_turtle.penup()
+    text_turtle.color(TEXT_COLOR)
+    text_turtle.goto(0, 250)
+    text_turtle.write(title, align="center", font=("Arial", 16, "bold"))
+    text_turtle.goto(0, 200)
+    text_turtle.write(description, align="center", font=("Arial", 12, "normal"))
+
+    # Hide turtles
+    t.hideturtle()
+    text_turtle.hideturtle()
+
+    # Keep the window open
+    turtle.done()
+
+
+# One function per STP algorithm; they only differ in layout, edges and text
 def draw_rstp_spanning_tree_with_animation(num_nodes):
-    # Set up the screen
-    screen = turtle.Screen()
-    screen.setup(width=1.0, height=1.0)  # Fullscreen
-    screen.bgcolor("white")
+    draw_topology(
+        circle_positions(num_nodes),
+        ring_edges(num_nodes),
+        "RSTP Spanning Tree",
+        "Enhances STP by reducing convergence times through the elimination of listening and learning states and the introduction of port roles and types.",
+    )
 
-    # Create a turtle object
-    t = turtle.Turtle()
-    t.speed(0)  # Set the drawing speed to the maximum
-    t.color(EDGE_COLOR)
 
-    # Draw nodes evenly spaced in a circle
-    node_positions = []
-    for i in range(num_nodes):
-        angle = 2 * math.pi * i / num_nodes
-        x = 0 + NODE_DISTANCE * math.cos(angle)
-        y = 0 + NODE_DISTANCE * math.sin(angle)
-        draw_node(t, x, y, str(i))
-        node_positions.append((x, y))
+def draw_star_topology(num_nodes, title, description):
+    draw_topology(circle_positions(num_nodes), star_edges(num_nodes), title, description)
 
-    # Draw edges between nodes to represent the spanning tree with animation
-    for i in range(1, num_nodes):
-        draw_edge_with_animation(t, node_positions[i][0], node_positions[i][1],
-                                 node_positions[i-1][0], node_positions[i-1][1])
 
-    # Draw edge from last node to first node to complete the cycle with animation
-    draw_edge_with_animation(t, node_positions[num_nodes - 1][0], node_positions[num_nodes - 1][1],
-                             node_positions[0][0], node_positions[0][1])
-
-    # Add text to explain what's going on
-    text_turtle = turtle.Turtle()
-    text_turtle.penup()
-    text_turtle.color(TEXT_COLOR)
-    text_turtle.goto(0, 250)
-    text_turtle.write("RSTP Spanning Tree", align="center", font=("Arial", 16, "bold"))
-    text_turtle.goto(0, 200)
-    text_turtle.write("Enhances STP by reducing convergence times through the elimination of listening and learning states and the introduction of port roles and types.", align="center", font=("Arial", 12, "normal"))
-
-    # Hide turtles
-    t.hideturtle()
-    text_turtle.hideturtle()
-
-    # Keep the window open
-    turtle.done()
-
-# Function to draw the spanning tree resulting from MSTP with animation
 def draw_mstp_spanning_tree_with_animation(num_nodes):
-    # Set up the screen
-    screen = turtle.Screen()
-    screen.setup(width=1.0, height=1.0)  # Fullscreen
-    screen.bgcolor("white")
-
-    # Create a turtle object
-    t = turtle.Turtle()
-    t.speed(0)  # Set the drawing speed to the maximum
-    t.color(EDGE_COLOR)
-
-    # Draw nodes evenly spaced in a circle
-    node_positions = []
-    for i in range(num_nodes):
-        angle = 2 * math.pi * i / num_nodes
-        x = 0 + NODE_DISTANCE * math.cos(angle)
-        y = 0 + NODE_DISTANCE * math.sin(angle)
-        draw_node(t, x, y, str(i))
-        node_positions.append((x, y))
-
-    # Draw edges between nodes to represent the spanning tree with animation
-    for i in range(1, num_nodes):
-        draw_edge_with_animation(t, node_positions[i][0], node_positions[i][1],
-                                 node_positions[0][0], node_positions[0][1])
-
-    # Add text to explain what's going on
-    text_turtle = turtle.Turtle()
-    text_turtle.penup()
-    text_turtle.color(TEXT_COLOR)
-    text_turtle.goto(0, 250)
-    text_turtle.write("MSTP Spanning Tree", align="center", font=("Arial", 16, "bold"))
-    text_turtle.goto(0, 200)
-    text_turtle.write("Extends RSTP to support multiple VLANs, optimizing network resource utilization by creating multiple spanning trees.", align="center", font=("Arial", 12, "normal"))
-
-    # Hide turtles
-    t.hideturtle()
-    text_turtle.hideturtle()
-
-    # Keep the window open
-    turtle.done()
+    draw_star_topology(
+        num_nodes,
+        "MSTP Spanning Tree",
+        "Extends RSTP to support multiple VLANs, optimizing network resource utilization by creating multiple spanning trees.",
+    )
 
 
-# Function to draw the spanning tree resulting from PVSTP with animation
 def draw_pvstp_spanning_tree_with_animation(num_nodes):
-    # Set up the screen
-    screen = turtle.Screen()
-    screen.setup(width=1.0, height=1.0)  # Fullscreen
-    screen.bgcolor("white")
+    draw_star_topology(
+        num_nodes,
+        "PVSTP Spanning Tree",
+        "Cisco's proprietary extension of STP, creating separate spanning tree instances for each VLAN to provide redundancy and load balancing.",
+    )
 
-    # Create a turtle object
-    t = turtle.Turtle()
-    t.speed(0)  # Set the drawing speed to the maximum
-    t.color(EDGE_COLOR)
 
-    # Draw nodes evenly spaced in a circle
-    node_positions = []
-    for i in range(num_nodes):
-        angle = 2 * math.pi * i / num_nodes
-        x = 0 + NODE_DISTANCE * math.cos(angle)
-        y = 0 + NODE_DISTANCE * math.sin(angle)
-        draw_node(t, x, y, str(i))
-        node_positions.append((x, y))
-
-    # Draw edges between nodes to represent the spanning tree with animation
-    for i in range(1, num_nodes):
-        draw_edge_with_animation(t, node_positions[i][0], node_positions[i][1],
-                                 node_positions[0][0], node_positions[0][1])
-
-    # Add text to explain what's going on
-    text_turtle = turtle.Turtle()
-    text_turtle.penup()
-    text_turtle.color(TEXT_COLOR)
-    text_turtle.goto(0, 250)
-    text_turtle.write("PVSTP Spanning Tree", align="center", font=("Arial", 16, "bold"))
-    text_turtle.goto(0, 200)
-    text_turtle.write("Cisco's proprietary extension of STP, creating separate spanning tree instances for each VLAN to provide redundancy and load balancing.", align="center", font=("Arial", 12, "normal"))
-
-    # Hide turtles
-    t.hideturtle()
-    text_turtle.hideturtle()
-
-    # Keep the window open
-    turtle.done()
-
-# Function to draw the spanning tree resulting from SPB with animation
 def draw_spb_spanning_tree_with_animation(num_nodes):
-    # Set up the screen
-    screen = turtle.Screen()
-    screen.setup(width=1.0, height=1.0)  # Fullscreen
-    screen.bgcolor("white")
-
-    # Create a turtle object
-    t = turtle.Turtle()
-    t.speed(0)  # Set the drawing speed to the maximum
-    t.color(EDGE_COLOR)
-
-    # Draw nodes in a grid
-    node_positions = []
-    rows = int(math.sqrt(num_nodes))
-    cols = num_nodes // rows
-    for i in range(rows):
-        for j in range(cols):
-            x = (j - cols // 2) * NODE_DISTANCE
-            y = (i - rows // 2) * NODE_DISTANCE
-            draw_node(t, x, y, f"{i*cols + j}")
-            node_positions.append((x, y))
-
-    # Draw edges between adjacent nodes in the grid with animation
-    for i in range(len(node_positions)):
-        for j in range(i + 1, len(node_positions)):
-            if abs(i - j) == 1 or abs(i - j) == cols:
-                draw_edge_with_animation(t, node_positions[i][0], node_positions[i][1],
-                                         node_positions[j][0], node_positions[j][1])
-    
-    # Add text to explain what's going on
-    text_turtle = turtle.Turtle()
-    text_turtle.penup()
-    text_turtle.color(TEXT_COLOR)
-    text_turtle.goto(0, 250)
-    text_turtle.write("SPB Spanning Tree", align="center", font=("Arial", 16, "bold"))
-    text_turtle.goto(0, 200)
-    text_turtle.write(" IEEE 802.1aq enables the creation of multiple equal-cost spanning trees, enhancing scalability and convergence in large networks.", align="center", font=("Arial", 12, "normal"))
-
-    # Hide turtles
-    t.hideturtle()
-    text_turtle.hideturtle()
-
-    # Keep the window open
-    turtle.done()
+    draw_topology(
+        grid_positions(num_nodes),
+        grid_edges(num_nodes),
+        "SPB Spanning Tree",
+        "IEEE 802.1aq enables the creation of multiple equal-cost spanning trees, enhancing scalability and convergence in large networks.",
+    )
 
 
 # Main function
+def _read_int(prompt, minimum):
+    """Keep prompting until the user enters an integer >= minimum."""
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+        if value is not None and value >= minimum:
+            return value
+        print(f"Invalid number. Please enter an integer >= {minimum}.")
+
+
 def main():
     # Prompt the user to choose the STP algorithm
     print("Choose an STP algorithm:")
@@ -225,21 +190,22 @@ def main():
     print("3. Per-VLAN Spanning Tree Protocol (PVSTP)")
     print("4. IEEE 802.1aq - Shortest Path Bridging (SPB)")
 
+    draw_functions = {
+        "1": draw_rstp_spanning_tree_with_animation,
+        "2": draw_mstp_spanning_tree_with_animation,
+        "3": draw_pvstp_spanning_tree_with_animation,
+        "4": draw_spb_spanning_tree_with_animation,
+    }
 
     choice = input("Enter your choice (1, 2, 3, or 4): ")
+    while choice not in draw_functions:
+        print("Invalid choice. Please enter 1, 2, 3, or 4.")
+        choice = input("Enter your choice (1, 2, 3, or 4): ")
 
-    num_nodes = int(input("Enter the number of nodes: "))
+    num_nodes = _read_int("Enter the number of nodes: ", minimum=MIN_NODES)
 
-    if choice == "1":
-        draw_rstp_spanning_tree_with_animation(num_nodes)
-    elif choice == "2":
-        draw_mstp_spanning_tree_with_animation(num_nodes)
-    elif choice == "3":
-        draw_pvstp_spanning_tree_with_animation(num_nodes)
-    elif choice == "4":
-        draw_spb_spanning_tree_with_animation(num_nodes)
-    else:
-        print("Invalid choice. Please enter 1 or 2.")
+    draw_functions[choice](num_nodes)
+
 
 if __name__ == "__main__":
     main()
