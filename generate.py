@@ -11,6 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
+import mstp
 import rstp
 import stp
 import topologies
@@ -41,6 +42,25 @@ def serialize_topology(topology: stp.Topology, hosts=()) -> dict:
 def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
                    seed: int = 42):
     """Run the simulation and return (embedded document, summary lines)."""
+    if protocol in ("pvst", "mstp"):
+        instances = topologies.build_instances(protocol, name, topology, seed)
+        result = mstp.simulate_multi(topology, instances, protocol)
+        vlan_count = sum(len(i.vlans) for i in instances)
+        title = ("PVST+ 逐步动画（每 VLAN 一棵树）" if protocol == "pvst"
+                 else "MSTP（802.1s）逐步动画（多 VLAN 映射实例）")
+        document = {
+            "protocol": protocol,
+            "title": title,
+            "subtitle": (
+                f"拓扑 {name} · {len(topology.switches)} 台交换机 · "
+                f"{len(topology.links)} 条链路 · {len(instances)} 个实例 · "
+                f"{vlan_count} 个 VLAN"
+            ),
+            "topology": serialize_topology(topology),
+            "instances": result.instances,
+        }
+        return document, result
+
     if protocol == "rstp":
         hosts = [rstp.Host("PC1", topologies.default_host_switch(name, topology, seed))]
         result = rstp.simulate_rstp(topology, hosts)
@@ -95,7 +115,8 @@ def main(argv=None) -> None:
         help="seed for the random topology (default: 42)",
     )
     parser.add_argument(
-        "-p", "--protocol", choices=("stp", "rstp"), default="stp",
+        "-p", "--protocol", choices=("stp", "rstp", "pvst", "mstp"),
+        default="stp",
         help="protocol to animate (default: stp)",
     )
     parser.add_argument(
@@ -123,7 +144,11 @@ def main(argv=None) -> None:
     print(f"written: {output}")
     print(f"  protocol={args.protocol} topology={args.topology} "
           f"switches={len(topology.switches)} links={len(topology.links)}")
-    if args.protocol == "rstp":
+    if args.protocol in ("pvst", "mstp"):
+        for inst in result.instances:
+            print(f"  instance={inst['id']} vlans={','.join(inst['vlans'])} "
+                  f"steps={len(inst['steps'])} root={inst['root_id']}")
+    elif args.protocol == "rstp":
         forwarding = sum(1 for r in result.link_roles.values() if r == "forwarding")
         alternates = sum(1 for r in result.link_roles.values() if r == "alternate")
         print(f"  steps={len(result.steps)} root={result.root_id} "
