@@ -69,12 +69,15 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
         result = rstp.simulate_rstp(topology, hosts)
         failure = (f" · 故障演示 {result.failed_link}" if result.failed_link
                    else " · 无冗余链路，跳过故障演示")
+        added = (f" · 新增链路 {'、'.join(result.added_links)}"
+                 if result.added_links else "")
         document = {
             "protocol": "rstp",
             "title": "RSTP（802.1w）逐步动画",
             "subtitle": (
                 f"拓扑 {name} · {len(topology.switches)} 台交换机 · "
-                f"{len(topology.links)} 条链路 · {len(result.steps)} 步{failure}"
+                f"{len(topology.links)} 条链路 · {len(result.steps)} 步"
+                f"{failure}{added}"
             ),
             "topology": serialize_topology(topology, result.hosts),
             "concept": concept,
@@ -158,7 +161,8 @@ def main(argv=None) -> None:
         alternates = sum(1 for r in result.link_roles.values() if r == "alternate")
         print(f"  steps={len(result.steps)} root={result.root_id} "
               f"forwarding={forwarding} alternate={alternates} "
-              f"failed_link={result.failed_link}")
+              f"failed_link={result.failed_link} "
+              f"added_links={','.join(result.added_links) or '-'}")
     else:
         blocked = len(result.link_roles) - sum(
             1 for r in result.link_roles.values() if r == "tree")
