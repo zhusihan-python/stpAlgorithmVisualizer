@@ -122,3 +122,19 @@ BUILDERS = {
     "classic-6": lambda args: classic6(),
     "random": lambda args: random_topology(args.nodes, args.seed),
 }
+
+# Where the edge-port demo host attaches for each built-in sample.
+HOST_SWITCH = {
+    "triangle": "S1",
+    "square-diagonal": "S4",
+    "classic-6": "S5",
+}
+
+
+def default_host_switch(name: str, topology: stp.Topology, seed: int) -> str:
+    """Deterministic switch to attach the edge-port demo host to."""
+    if name in HOST_SWITCH:
+        return HOST_SWITCH[name]
+    import random
+    rng = random.Random(seed + 1000)
+    return rng.choice([s.id for s in topology.switches])
