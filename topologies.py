@@ -1,0 +1,124 @@
+"""Topology builders for the STP visualizer.
+
+Three hand-picked teaching scenarios plus a seeded random generator.
+All builders return a ``stp.Topology``.
+"""
+
+import random
+from typing import List
+
+import stp
+
+# Classic STP port costs by link speed (for a realistic flavour).
+COST_FAST = 19   # 100 Mbps
+COST_GIGA = 4    # 1 Gbps
+COST_TEN_G = 1   # 10 Gbps
+
+
+def _switches(count: int, priorities: List[int]) -> List[stp.Switch]:
+    """S1..Sn with the given priorities and MACs ordered by index."""
+    return [
+        stp.Switch(
+            id=f"S{i + 1}",
+            priority=priorities[i],
+            mac="00:00:00:00:{:02x}:{:02x}".format((i + 1) // 256, (i + 1) % 256),
+        )
+        for i in range(count)
+    ]
+
+
+def triangle() -> stp.Topology:
+    """3 switches, equal costs: root election + one blocked link by bridge-ID tie-break."""
+    return stp.Topology(
+        switches=_switches(3, [32768, 32768, 8192]),
+        links=[
+            stp.Link("S1", "S2", COST_GIGA),
+            stp.Link("S1", "S3", COST_GIGA),
+            stp.Link("S2", "S3", COST_GIGA),
+        ],
+    )
+
+
+def square_diagonal() -> stp.Topology:
+    """4 switches: shows a cheaper two-hop path beating a direct 19-cost link."""
+    return stp.Topology(
+        switches=_switches(4, [32768, 8192, 32768, 24576]),
+        links=[
+            stp.Link("S1", "S2", COST_GIGA),
+            stp.Link("S2", "S3", COST_GIGA),
+            stp.Link("S3", "S4", COST_GIGA),
+            stp.Link("S4", "S1", COST_GIGA),
+            stp.Link("S2", "S4", COST_FAST),
+        ],
+    )
+
+
+def classic6() -> stp.Topology:
+    """6 switches, a ring plus two chords: equal-cost tie-breaks and blocked chords."""
+    return stp.Topology(
+        switches=_switches(6, [32768, 32768, 32768, 8192, 32768, 32768]),
+        links=[
+            stp.Link("S1", "S2", COST_GIGA),
+            stp.Link("S2", "S3", COST_GIGA),
+            stp.Link("S3", "S4", COST_GIGA),
+            stp.Link("S4", "S5", COST_GIGA),
+            stp.Link("S5", "S6", COST_GIGA),
+            stp.Link("S6", "S1", COST_GIGA),
+            stp.Link("S2", "S6", COST_FAST),
+            stp.Link("S3", "S5", COST_FAST),
+        ],
+    )
+
+
+def random_topology(num_switches: int, seed: int) -> stp.Topology:
+    """Seeded random connected topology: random spanning tree + extra edges.
+
+    One randomly placed switch gets priority 8192 so the root election is
+    not always won by S1.
+    """
+    if num_switches < 3:
+        raise ValueError("random topology needs at least 3 switches")
+    rng = random.Random(seed)
+
+    ids = [f"S{i + 1}" for i in range(num_switches)]
+    priorities = [32768] * num_switches
+    priorities[rng.randrange(num_switches)] = 8192
+    switches = _switches(num_switches, priorities)
+
+    # Random spanning tree: shuffle the ids and chain them up.
+    order = ids[:]
+    rng.shuffle(order)
+    links = []
+    for first, second in zip(order, order[1:]):
+        a, b = sorted((first, second))
+        links.append(stp.Link(a, b, rng.choice([COST_TEN_G, COST_GIGA, COST_GIGA, COST_FAST])))
+
+    # Extra edges between random non-adjacent pairs, up to 2n links total.
+    # Note: pairs must be compared in their canonical (sorted) form, or the
+    # two-digit ids (S10 sorts before S9) defeat the "not in existing" check.
+    existing = {link.pair() for link in links}
+    max_links = 2 * num_switches
+    all_pairs = [
+        tuple(sorted((a, b)))
+        for i, a in enumerate(ids)
+        for b in ids[i + 1:]
+    ]
+    candidates = [pair for pair in all_pairs if pair not in existing]
+    rng.shuffle(candidates)
+    for a, b in candidates:
+        if len(links) >= max_links:
+            break
+        if rng.random() < 0.35:
+            links.append(stp.Link(a, b, rng.choice([COST_TEN_G, COST_GIGA, COST_GIGA, COST_FAST])))
+
+    # Deterministic order so serialization is reproducible.
+    links.sort(key=lambda link: link.pair())
+    return stp.Topology(switches=switches, links=links)
+
+
+BUILDERS = {
+    "triangle": lambda args: triangle(),
+    "square-diagonal": lambda args: square_diagonal(),
+    "classic-6": lambda args: classic6(),
+    "random": lambda args: random_topology(args.nodes, args.seed),
+}
