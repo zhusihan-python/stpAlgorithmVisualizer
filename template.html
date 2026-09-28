@@ -41,6 +41,7 @@
     background: var(--accent); border-color: var(--accent); font-weight: 600;
   }
   .tabs button:hover:not(.active) { border-color: var(--accent); }
+  .tabs button.overlay { border-style: dashed; }
   #stage {
     width: 100%; background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; display: block;
@@ -123,6 +124,9 @@ const INSTANCES = DATA.instances || null;
 const cursors = INSTANCES ? INSTANCES.map(() => 0) : null;
 let instIdx = 0;
 let steps = INSTANCES ? INSTANCES[0].steps : DATA.steps;
+// Overlay comparison view: all instances' converged trees on one canvas.
+let overlayMode = false;
+const INST_COLORS = ['#22c55e', '#38bdf8', '#f472b6'];
 const N = topo.switches.length;
 
 const W = 960, H = 640, R = Math.min(W, H) / 2 - 115;
@@ -198,6 +202,39 @@ function portLine(sid, st) {
 }
 
 function renderPanels() {
+  if (overlayMode) {
+    $('counter').textContent = '叠加对比视图';
+    const first = JSON.stringify(INSTANCES[0].link_roles);
+    const sameTrees = INSTANCES.every(
+      inst => JSON.stringify(inst.link_roles) === first);
+    $('desc').textContent =
+      '同一物理拓扑上所有实例收敛后的生成树叠加：每种颜色是一个实例的树；' +
+      '并行双色线 = 多个实例都在该链路转发；红 ✕ = 对所有实例都是冗余链路。' +
+      (sameTrees
+        ? '本拓扑各实例的树相同，链路未被分担。'
+        : '不同实例的树使用不同链路——冗余链路为部分实例转发，实现负载分担。');
+    const list = $('events');
+    list.innerHTML = '';
+    INSTANCES.forEach(inst => {
+      const li = document.createElement('li');
+      li.textContent = inst.id +
+        (inst.vlans.length > 1 ? '（VLAN ' + inst.vlans.join(',') + '）' : '') +
+        ' 根桥：' + inst.root_id;
+      list.appendChild(li);
+    });
+    topo.links.forEach(l => {
+      const parts = INSTANCES.map(inst =>
+        inst.link_roles[l.id] === 'tree' ? inst.id + ' 转发' : inst.id + ' 阻塞');
+      const trees = INSTANCES.filter(
+        inst => inst.link_roles[l.id] === 'tree').length;
+      const li = document.createElement('li');
+      li.textContent = l.id.replace('-', '–') + '：' + parts.join('；');
+      if (trees === INSTANCES.length) li.style.color = '#86efac';
+      if (trees === 0) li.style.color = '#fca5a5';
+      list.appendChild(li);
+    });
+    return;
+  }
   const st = steps[cur];
   $('counter').textContent = '第 ' + (cur + 1) + ' / ' + steps.length + ' 步';
   $('desc').textContent = st.description;
@@ -237,8 +274,10 @@ function renderPanels() {
 }
 
 function updateButtons() {
-  $('btn-first').disabled = $('btn-prev').disabled = cur === 0;
-  $('btn-next').disabled = $('btn-last').disabled = cur === steps.length - 1;
+  const off = overlayMode;
+  $('btn-first').disabled = $('btn-prev').disabled = off || cur === 0;
+  $('btn-next').disabled = $('btn-last').disabled = off || cur === steps.length - 1;
+  $('btn-play').disabled = off;
   $('btn-play').textContent = playing ? '⏸' : '▶';
 }
 
@@ -265,8 +304,104 @@ function drawX(at, color) {
   ctx.stroke();
 }
 
+function instColor(idx) {
+  return INST_COLORS[idx % INST_COLORS.length];
+}
+
+function drawOverlay() {
+  // Links: one line per forwarding instance (parallel when several), red ✕
+  // when redundant for every instance.
+  for (const l of topo.links) {
+    const p1 = pos[l.a], p2 = pos[l.b];
+    const fwdIdx = [];
+    INSTANCES.forEach((inst, i) => {
+      if (inst.link_roles[l.id] === 'tree') fwdIdx.push(i);
+    });
+    if (fwdIdx.length === 0) {
+      ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.setLineDash([9, 7]);
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      ctx.setLineDash([]);
+      drawX({ x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, '#ef4444');
+    } else {
+      const dx = p2.x - p1.x, dy = p2.y - p1.y;
+      const len = Math.hypot(dx, dy);
+      const nx = -dy / len, ny = dx / len;
+      fwdIdx.slice(0, 2).forEach((idx, k) => {
+        const off = fwdIdx.length === 1 ? 0 : (k === 0 ? 3.5 : -3.5);
+        ctx.strokeStyle = instColor(idx); ctx.lineWidth = fwdIdx.length === 1 ? 4 : 3;
+        ctx.beginPath();
+        ctx.moveTo(p1.x + nx * off, p1.y + ny * off);
+        ctx.lineTo(p2.x + nx * off, p2.y + ny * off);
+        ctx.stroke();
+      });
+    }
+    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 - 7 };
+    const costText = '成本 ' + l.cost;
+    ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    const costW = ctx.measureText(costText).width;
+    ctx.fillStyle = 'rgba(30,41,59,.92)';
+    ctx.fillRect(mid.x - costW / 2 - 3, mid.y - 11, costW + 6, 15);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(costText, mid.x, mid.y);
+  }
+
+  // Switches with per-instance root badges.
+  for (const s of topo.switches) {
+    const p = pos[s.id];
+    ctx.beginPath(); ctx.arc(p.x, p.y, NODE_R, 0, 2 * Math.PI);
+    ctx.fillStyle = '#3b82f6'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(s.id, p.x, p.y + 5);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '11px sans-serif';
+    ctx.fillText(s.bridge_id, p.x, p.y + NODE_R + 16);
+    let badge = 0;
+    INSTANCES.forEach((inst, i) => {
+      if (inst.root_id !== s.id) return;
+      const y = p.y - 32 - badge * 16;
+      ctx.fillStyle = instColor(i); ctx.font = 'bold 11px sans-serif';
+      ctx.fillText('★ ' + inst.id, p.x, y);
+      badge++;
+    });
+  }
+
+  // On-canvas legend, top-left.
+  const lx = 16, ly = 14, lw = 200, lh = 30 + (INSTANCES.length + 2) * 20;
+  ctx.fillStyle = 'rgba(15,23,42,.85)';
+  ctx.strokeStyle = '#334155'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(lx, ly, lw, lh, 8); else ctx.rect(lx, ly, lw, lh);
+  ctx.fill(); ctx.stroke();
+  let yy = ly + 24;
+  ctx.textAlign = 'left'; ctx.font = '11.5px sans-serif';
+  INSTANCES.forEach((inst, i) => {
+    ctx.strokeStyle = instColor(i); ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(lx + 12, yy - 4); ctx.lineTo(lx + 40, yy - 4); ctx.stroke();
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText(inst.id + '（单色=仅此实例转发）', lx + 48, yy);
+    yy += 20;
+  });
+  ctx.strokeStyle = instColor(0); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 7); ctx.lineTo(lx + 40, yy - 7); ctx.stroke();
+  ctx.strokeStyle = instColor(1); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 1); ctx.lineTo(lx + 40, yy - 1); ctx.stroke();
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText('并行双色=多实例转发', lx + 48, yy);
+  yy += 20;
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.5; ctx.setLineDash([6, 5]);
+  ctx.beginPath(); ctx.moveTo(lx + 12, yy - 4); ctx.lineTo(lx + 40, yy - 4); ctx.stroke();
+  ctx.setLineDash([]);
+  drawX({ x: lx + 26, y: yy - 4 }, '#ef4444');
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText('全实例冗余（阻塞）', lx + 48, yy);
+}
+
 function draw(now) {
   ctx.clearRect(0, 0, W, H);
+  if (overlayMode) {
+    drawOverlay();
+    requestAnimationFrame(draw);
+    return;
+  }
   const st = steps[cur];
   const isFinal = st.kind === 'final';
   // RSTP steps carry an explicit per-step link-state map; classic STP only
@@ -383,6 +518,7 @@ $('btn-play').onclick = () => {
 $('speed').onchange = e => { speed = parseFloat(e.target.value); };
 
 document.addEventListener('keydown', e => {
+  if (overlayMode) return;
   if (e.key === 'ArrowLeft') { setStep(cur - 1); e.preventDefault(); }
   else if (e.key === 'ArrowRight') { setStep(cur + 1); e.preventDefault(); }
   else if (e.key === ' ') { $('btn-play').click(); e.preventDefault(); }
@@ -401,18 +537,36 @@ function buildTabs() {
     btn.onclick = () => switchInstance(i);
     holder.appendChild(btn);
   });
+  const overlayBtn = document.createElement('button');
+  overlayBtn.className = 'overlay';
+  overlayBtn.textContent = '叠加对比';
+  overlayBtn.onclick = () => switchInstance(INSTANCES.length);
+  holder.appendChild(overlayBtn);
   updateTabs();
 }
 
 function updateTabs() {
   if (!INSTANCES) return;
   [...$('tabs').children].forEach((btn, i) =>
-    btn.classList.toggle('active', i === instIdx));
+    btn.classList.toggle('active', overlayMode ? i === INSTANCES.length
+                                               : i === instIdx));
 }
 
 function switchInstance(i) {
-  if (!INSTANCES || i === instIdx) return;
+  if (!INSTANCES) return;
+  if (i === INSTANCES.length) {         // overlay comparison tab
+    cursors[instIdx] = cur;
+    overlayMode = true;
+    playing = false;
+    enterTime = performance.now();
+    renderPanels();
+    updateButtons();
+    updateTabs();
+    return;
+  }
+  if (i === instIdx && !overlayMode) return;
   cursors[instIdx] = cur;
+  overlayMode = false;
   instIdx = i;
   steps = INSTANCES[i].steps;
   playing = false;
