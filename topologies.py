@@ -1,11 +1,14 @@
 """Topology builders for the STP visualizer.
 
-Three hand-picked teaching scenarios plus a seeded random generator.
+Three hand-picked teaching scenarios plus a seeded random generator and a
+loader for user-supplied topology files (JSON).
 All builders return a ``stp.Topology``.
 """
 
+import json
 import random
-from typing import List
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import stp
 
@@ -158,6 +161,53 @@ def _second_root_overrides(name, topology, seed):
     rng = random.Random(seed + 2000)
     candidates = [s.id for s in topology.switches if s.id != base_root]
     return {rng.choice(candidates): 4096}
+
+
+def from_file(path) -> Tuple[stp.Topology, Dict[str, Tuple[float, float]]]:
+    """Load a custom topology from a JSON file.
+
+    Schema::
+
+        {
+          "switches": [{"id": "S1", "priority": 32768, "mac": "...",
+                        "x": 0.5, "y": 0.1}, ...],     # priority/mac/x/y optional
+          "links":    [{"a": "S1", "b": "S2", "cost": 4}, ...]  # cost optional
+        }
+
+    ``x``/``y`` are normalized canvas positions (0..1) used by the player;
+    entries are collected for every switch that has them (partial allowed).
+    Graph rules (connectivity, no duplicates, cost >= 1) are enforced by
+    ``stp.validate``.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or "switches" not in data or "links" not in data:
+        raise ValueError("topology file needs top-level 'switches' and 'links'")
+
+    switches = []
+    positions: Dict[str, Tuple[float, float]] = {}
+    for i, raw in enumerate(data["switches"], 1):
+        if not isinstance(raw, dict) or "id" not in raw:
+            raise ValueError(f"switch #{i} needs an 'id'")
+        num = i
+        switches.append(stp.Switch(
+            id=str(raw["id"]),
+            priority=int(raw.get("priority", 32768)),
+            mac=str(raw.get("mac") or
+                    "00:00:00:00:{:02x}:{:02x}".format(num // 256, num % 256)),
+        ))
+        if "x" in raw and "y" in raw:
+            positions[str(raw["id"])] = (float(raw["x"]), float(raw["y"]))
+
+    links = []
+    for i, raw in enumerate(data["links"], 1):
+        if not isinstance(raw, dict) or "a" not in raw or "b" not in raw:
+            raise ValueError(f"link #{i} needs 'a' and 'b'")
+        links.append(stp.Link(str(raw["a"]), str(raw["b"]),
+                              int(raw.get("cost", COST_GIGA))))
+
+    topology = stp.Topology(switches=switches, links=links)
+    stp.validate(topology)
+    return topology, positions
 
 
 def build_instances(protocol, name, topology, seed):

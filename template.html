@@ -178,10 +178,30 @@ const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 })();
 
+// Switch positions: explicit normalized coords (custom topology) win;
+// joined switches (appear_at, e.g. RSTP late joins) are placed just
+// outside their first positioned neighbour; everything else is circular.
 const pos = {};
+const deferredPos = [];
 topo.switches.forEach((s, i) => {
-  const a = -Math.PI / 2 + 2 * Math.PI * i / N;
-  pos[s.id] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+  const custom = DATA.positions && DATA.positions[s.id];
+  if (custom) {
+    pos[s.id] = { x: 70 + custom.x * (W - 140), y: 60 + custom.y * (H - 120) };
+  } else if (s.appear_at !== undefined) {
+    deferredPos.push(s.id);
+  } else {
+    const a = -Math.PI / 2 + 2 * Math.PI * i / N;
+    pos[s.id] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+  }
+});
+deferredPos.forEach(sid => {
+  const link = topo.links.find(l =>
+    (l.a === sid || l.b === sid) && pos[l.a === sid ? l.b : l.a]);
+  if (!link) { pos[sid] = { x: CX, y: CY }; return; }
+  const anchor = pos[link.a === sid ? link.b : link.a];
+  const dx = anchor.x - CX, dy = anchor.y - CY;
+  const len = Math.hypot(dx, dy) || 1;
+  pos[sid] = { x: anchor.x + dx / len * 95, y: anchor.y + dy / len * 95 };
 });
 const swById = {};
 topo.switches.forEach(s => { swById[s.id] = s; });
