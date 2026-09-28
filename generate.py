@@ -18,7 +18,9 @@ import stp
 import topologies
 
 TEMPLATE_PATH = Path(__file__).with_name("template.html")
+PLAYER_PATH = Path(__file__).with_name("player.js")
 DATA_PLACEHOLDER = "__DATA__"
+PLAYER_PLACEHOLDER = "/*__PLAYER__*/"
 
 
 def serialize_topology(topology: stp.Topology, hosts=(), appear=None) -> dict:
@@ -120,11 +122,19 @@ def build_document(name: str, topology: stp.Topology, protocol: str = "stp",
     return add_positions(document), result
 
 
-def render_html(document: dict, template: str) -> str:
+def render_html(document: dict, template: str, player_js: str = None) -> str:
     if DATA_PLACEHOLDER not in template:
         raise RuntimeError("template.html is missing the __DATA__ placeholder")
+    if player_js is None:
+        player_js = PLAYER_PATH.read_text(encoding="utf-8")
+    if PLAYER_PLACEHOLDER not in template:
+        raise RuntimeError("template.html is missing the player placeholder")
+    if DATA_PLACEHOLDER in player_js:
+        raise RuntimeError("player.js must not contain the data placeholder")
     payload = json.dumps(document, ensure_ascii=False).replace("</", "<\\/")
-    return template.replace(DATA_PLACEHOLDER, payload)
+    return (template
+            .replace(DATA_PLACEHOLDER, payload)
+            .replace(PLAYER_PLACEHOLDER, player_js))
 
 
 def main(argv=None) -> None:

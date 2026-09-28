@@ -237,7 +237,8 @@ class GeneratorTests(unittest.TestCase):
 
     def test_render_escapes_closing_script_tag(self):
         document = {"steps": [{"description": "</script>"}]}
-        html = generate.render_html(document, "before __DATA__ after")
+        html = generate.render_html(
+            document, "before __DATA__ mid /*__PLAYER__*/ after")
         self.assertIn("<\\/script>", html)   # payload escaped, JSON still valid
         self.assertEqual(html.count("</script>"), 0)
 

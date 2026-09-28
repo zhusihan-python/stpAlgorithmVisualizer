@@ -55,9 +55,10 @@ class ConceptContentTests(unittest.TestCase):
 class EmbeddingTests(unittest.TestCase):
     def test_documents_carry_concept_and_player_has_modal(self):
         template = generate.TEMPLATE_PATH.read_text(encoding="utf-8")
-        for hook in ("btn-concept", "concept-modal", "concept-body",
-                     "buildConceptModal"):
+        for hook in ("btn-concept", "concept-modal", "concept-body"):
             self.assertIn(hook, template)
+        player = generate.PLAYER_PATH.read_text(encoding="utf-8")
+        self.assertIn("buildConceptModal", player)
         builders = {"triangle": topologies.triangle,
                     "classic-6": topologies.classic6,
                     "square-diagonal": topologies.square_diagonal}
