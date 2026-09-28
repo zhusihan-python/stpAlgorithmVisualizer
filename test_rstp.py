@@ -21,7 +21,8 @@ def chain_topology(count=4):
 class BootPhaseTests(unittest.TestCase):
     def check_boot(self, topology, hosts=()):
         result = rstp.simulate_rstp(topology, hosts, include_failure=False,
-                                    include_link_add=False)
+                                    include_link_add=False,
+                                    include_switch_join=False)
         n = len(topology.switches)
         steps = result.steps
         kinds = [s["kind"] for s in steps]
@@ -107,7 +108,8 @@ class EdgePortTests(unittest.TestCase):
 class FailurePhaseTests(unittest.TestCase):
     def check_failure(self, topology):
         result = rstp.simulate_rstp(topology, include_failure=True,
-                                    include_link_add=False)
+                                    include_link_add=False,
+                                    include_switch_join=False)
         if result.failed_link is None:
             return "skipped"
         n = len(topology.switches)
@@ -153,7 +155,8 @@ class FailurePhaseTests(unittest.TestCase):
     def test_no_redundancy_skips_failure(self):
         topology = chain_topology(4)
         result = rstp.simulate_rstp(topology, include_failure=True,
-                                    include_link_add=False)
+                                    include_link_add=False,
+                                    include_switch_join=False)
         self.assertIsNone(result.failed_link)
         self.assertIn("跳过故障演示", result.steps[-1]["description"])
         self.assertEqual(result.steps[-1]["phase"], "boot-final")
@@ -193,14 +196,13 @@ def complete_topology(count=3, cost=4):
 class LinkAddTests(unittest.TestCase):
     def final_roles(self, topology):
         result = rstp.simulate_rstp(topology)
-        final = stp.Topology(list(topology.switches), result.final_links)
-        fresh = stp.simulate(final)
+        fresh = stp.simulate(result.final_topology)
         expected = {
             link.id(): ("forwarding" if fresh.link_roles[link.id()] == "tree"
                         else "alternate")
-            for link in result.final_links
+            for link in result.final_topology.links
         }
-        final_ids = {link.id() for link in result.final_links}
+        final_ids = {link.id() for link in result.final_topology.links}
         if result.failed_link and result.failed_link not in final_ids:
             expected[result.failed_link] = "down"
         return result, fresh, expected
@@ -262,7 +264,8 @@ class LinkAddTests(unittest.TestCase):
 
     def test_link_add_skipped_for_complete_topology_without_failure(self):
         result = rstp.simulate_rstp(complete_topology(4),
-                                    include_failure=False)
+                                    include_failure=False,
+                                    include_switch_join=False)
         self.assertEqual(result.added_links, [])
         self.assertEqual(result.steps[-1]["phase"], "boot-final")
 
@@ -276,7 +279,8 @@ class LinkAddTests(unittest.TestCase):
             order,
             ["boot", "cascade", "boot-final", "failure",
              "failure-final", "link-add", "link-add-worse-final",
-             "link-add-better-final"])
+             "link-add-better-final", "switch-join", "switch-join-final",
+             "switch-join-root", "switch-join-root-final"])
 
     def test_deterministic(self):
         def doc():
@@ -285,6 +289,79 @@ class LinkAddTests(unittest.TestCase):
         import json
         self.assertEqual(json.dumps(doc(), sort_keys=True),
                          json.dumps(doc(), sort_keys=True))
+
+
+class SwitchJoinTests(unittest.TestCase):
+    def step_index(self, result, phase):
+        """Index of the FIRST step carrying `phase` (phases repeat)."""
+        return next(i for i, s in enumerate(result.steps)
+                    if s["phase"] == phase)
+
+    def phases_of(self, result):
+        order = []
+        for step in result.steps:
+            if step["phase"] not in order:
+                order.append(step["phase"])
+        return order
+
+    def test_normal_join_does_not_disturb_tree(self):
+        topology = topologies.classic6()
+        pre = rstp.simulate_rstp(topology)  # includes joins
+        join_final = pre.steps[self.step_index(pre, "switch-join-final")]
+        # No existing switch changed its root port across the normal join.
+        before = pre.steps[self.step_index(pre, "switch-join") - 1]
+        for sid, info in before["switches"].items():
+            self.assertEqual(join_final["switches"][sid]["root"],
+                             info["root"])
+            self.assertEqual(
+                join_final["roles"]["ports"][sid]["root_port"],
+                before["roles"]["ports"][sid]["root_port"],
+                f"{sid} was disturbed")
+        # The joined switch is a leaf with exactly one root port.
+        joined = pre.joined_switches[0]
+        self.assertIsNotNone(join_final["roles"]["ports"][joined]["root_port"])
+        # Tree grew by exactly one forwarding link per new switch.
+        fwd = sum(1 for s in join_final["links"].values() if s == "forwarding")
+        self.assertEqual(fwd, len(topology.switches))  # 6 + 1 joined - 1
+
+    def test_root_join_migrates_root(self):
+        topology = topologies.classic6()
+        result = rstp.simulate_rstp(topology)
+        changer = result.joined_switches[1]
+        final = result.steps[-1]
+        self.assertEqual(final["roles"]["root"], changer)
+        self.assertEqual(result.root_id, changer)
+        # Everyone else re-oriented toward the new root.
+        joined_final = result.steps[self.step_index(result,
+                                                    "switch-join-final")]
+        before_ports = joined_final["roles"]["ports"]
+        migrated = [sid for sid in final["roles"]["ports"]
+                    if sid in before_ports and
+                    final["roles"]["ports"][sid]["root_port"] !=
+                    before_ports[sid]["root_port"]]
+        self.assertGreater(len(migrated), 0)
+        # Final topology sim check: forwarding = switches - 1.
+        n = len(result.final_topology.switches)
+        fwd = sum(1 for s in final["links"].values() if s == "forwarding")
+        self.assertEqual(fwd, n - 1)
+
+    def test_join_steps_carry_appear(self):
+        result = rstp.simulate_rstp(topologies.triangle())
+        self.assertEqual(len(result.joined_switches), 2)
+        for sid in result.joined_switches:
+            self.assertIn(sid, result.appear)
+        # Every appearing switch has its own switch-online step.
+        online = [s for s in result.steps if s["kind"] == "switch-online"]
+        self.assertEqual(len(online), 2)
+
+    def test_events_never_reference_hosts(self):
+        topology = topologies.classic6()
+        result = rstp.simulate_rstp(
+            topology, hosts=[rstp.Host("PC1", "S5")])
+        for step in result.steps:
+            for event in step["events"]:
+                self.assertNotIn(event["from"], {"PC1"})
+                self.assertNotIn(event["to"], {"PC1"})
 
 
 class DocumentTests(unittest.TestCase):
